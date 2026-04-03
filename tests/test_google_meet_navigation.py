@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import logging
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -122,6 +123,36 @@ class _SlowGotoPage(_StubPage):
 
     async def screenshot(self, **kwargs: object) -> bytes:
         self.screenshot_calls.append(dict(kwargs))
+        return b"png"
+
+
+class _SlowDiagnosticsPage(_SlowGotoPage):
+    def __init__(
+        self,
+        *,
+        goto_delay_seconds: float,
+        diagnostics_delay_seconds: float,
+    ) -> None:
+        super().__init__(delay_seconds=goto_delay_seconds)
+        self.diagnostics_delay_seconds = diagnostics_delay_seconds
+
+    async def title(self) -> str:
+        await asyncio.sleep(self.diagnostics_delay_seconds)
+        return "Loading"
+
+    async def content(self) -> str:
+        await asyncio.sleep(self.diagnostics_delay_seconds)
+        return """
+        <html>
+          <body>
+            Slow diagnostics page
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        await asyncio.sleep(self.diagnostics_delay_seconds)
         return b"png"
 
 
@@ -271,3 +302,30 @@ def test_google_meet_join_enforces_outer_navigation_timeout(monkeypatch, caplog)
     assert page.screenshot_calls
     assert "Google Meet navigation timed out" in caplog.text
     assert "Loading Google Meet..." in caplog.text
+
+
+def test_google_meet_join_bounds_timeout_diagnostics(monkeypatch, caplog) -> None:
+    google_meet_module = _load_google_meet_module()
+    monkeypatch.setattr(google_meet_module, "_NAVIGATION_STEP_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(google_meet_module, "_DIAGNOSTIC_STEP_DEADLINE_SECONDS", 0.01)
+
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _SlowDiagnosticsPage(
+        goto_delay_seconds=0.05,
+        diagnostics_delay_seconds=0.2,
+    )
+
+    started_at = time.monotonic()
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(TimeoutError):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.15
+    assert "Google Meet navigation timed out" in caplog.text

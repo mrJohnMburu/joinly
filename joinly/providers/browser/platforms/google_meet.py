@@ -4,8 +4,9 @@ import logging
 import re
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -21,6 +22,9 @@ _MAX_MESSAGE_LENGTH = 500
 _MAX_NAVIGATION_HTML_LOG_CHARS = 240
 _NAVIGATION_TIMEOUT_MS = 20000
 _NAVIGATION_STEP_DEADLINE_SECONDS = 25.0
+_DIAGNOSTIC_STEP_DEADLINE_SECONDS = 1.0
+
+_T = TypeVar("_T")
 
 
 class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
@@ -355,22 +359,27 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     ) -> None:
         """Log browser state when a Google Meet join step stalls."""
         current_url = getattr(page, "url", "<unavailable>")
-        title = "<unavailable>"
-        html_snippet = "<unavailable>"
+        title = await self._read_page_diagnostic(
+            page.title,
+            fallback="<unavailable>",
+        )
+        html_content = await self._read_page_diagnostic(
+            page.content,
+            fallback="<unavailable>",
+        )
+        html_snippet = self._summarize_html(html_content)
         screenshot_path = "<unavailable>"
 
-        with contextlib.suppress(Exception):
-            title = await page.title()
-
-        with contextlib.suppress(Exception):
-            html_snippet = self._summarize_html(await page.content())
-
-        with contextlib.suppress(Exception):
-            screenshot_path = str(
-                Path(tempfile.gettempdir())
-                / f"joinly-google-meet-timeout-{int(time.time() * 1000)}.png"
-            )
-            await page.screenshot(path=screenshot_path, type="png")
+        candidate_screenshot_path = str(
+            Path(tempfile.gettempdir())
+            / f"joinly-google-meet-timeout-{int(time.time() * 1000)}.png"
+        )
+        captured_screenshot = await self._read_page_diagnostic(
+            lambda: page.screenshot(path=candidate_screenshot_path, type="png"),
+            fallback=None,
+        )
+        if captured_screenshot is not None:
+            screenshot_path = candidate_screenshot_path
 
         logger.error(
             "%s "
@@ -393,6 +402,21 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         if len(squashed) <= _MAX_NAVIGATION_HTML_LOG_CHARS:
             return squashed
         return squashed[: _MAX_NAVIGATION_HTML_LOG_CHARS - 3] + "..."
+
+    async def _read_page_diagnostic(
+        self,
+        reader: Callable[[], Awaitable[_T]],
+        *,
+        fallback: _T,
+    ) -> _T:
+        """Return a bounded diagnostic value from a potentially stuck page."""
+        try:
+            return await asyncio.wait_for(
+                reader(),
+                timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
+            )
+        except Exception:
+            return fallback
 
     async def _open_chat(self, page: Page) -> None:
         """Open the chat in the Google Meet meeting."""
