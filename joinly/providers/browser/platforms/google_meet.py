@@ -156,14 +156,20 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         await self._capture_debug_snapshot(page, stage="pre_click")
         logger.debug("Google Meet join: clicking join button")
         try:
-            await join_btn.click(timeout=10000, force=True, no_wait_after=True)
+            await join_btn.click(timeout=5000)
         except PlaywrightTimeoutError:
-            await self._log_join_step_timeout(
-                page,
-                target_url=url,
-                step="join_button.click",
+            logger.debug(
+                "Google Meet join: regular click timed out, retrying with force"
             )
-            raise
+            try:
+                await join_btn.click(timeout=10000, force=True, no_wait_after=True)
+            except PlaywrightTimeoutError:
+                await self._log_join_step_timeout(
+                    page,
+                    target_url=url,
+                    step="join_button.click",
+                )
+                raise
         await self._capture_debug_snapshot(page, stage="post_click")
 
         if not await self._check_joined(page):
