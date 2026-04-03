@@ -418,7 +418,10 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     async def _locator_is_visible(self, locator: Any) -> bool:
         """Safely check whether a locator is visible."""
         with contextlib.suppress(Exception):
-            return await locator.is_visible()
+            return await asyncio.wait_for(
+                locator.is_visible(),
+                timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
+            )
         return False
 
     async def _read_page_text(self, page: Page) -> str:

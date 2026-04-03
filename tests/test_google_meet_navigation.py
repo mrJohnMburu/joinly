@@ -199,6 +199,16 @@ class _VisibilityLocator:
         return None
 
 
+class _SlowVisibilityLocator(_VisibilityLocator):
+    def __init__(self, visible: bool, *, delay_seconds: float) -> None:
+        super().__init__(visible)
+        self._delay_seconds = delay_seconds
+
+    async def is_visible(self) -> bool:
+        await asyncio.sleep(self._delay_seconds)
+        return await super().is_visible()
+
+
 class _JoinStatePage:
     def __init__(
         self,
@@ -242,6 +252,30 @@ class _JoinStatePage:
         if 'div[role="dialog"] [data-mdc-dialog-action]' in lowered_selector:
             return _VisibilityLocator(False)
         return _VisibilityLocator(False)
+
+
+class _SlowJoinStatePage(_JoinStatePage):
+    def __init__(
+        self,
+        *,
+        url: str,
+        html: str,
+        delay_seconds: float,
+    ) -> None:
+        super().__init__(url=url, html=html)
+        self._delay_seconds = delay_seconds
+
+    def get_by_role(self, role: str, *, name: object) -> _VisibilityLocator:
+        return _SlowVisibilityLocator(
+            super().get_by_role(role, name=name)._visible,
+            delay_seconds=self._delay_seconds,
+        )
+
+    def get_by_placeholder(self, pattern: object) -> _VisibilityLocator:
+        return _SlowVisibilityLocator(
+            super().get_by_placeholder(pattern)._visible,
+            delay_seconds=self._delay_seconds,
+        )
 
 
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
@@ -581,3 +615,29 @@ def test_google_meet_join_does_not_block_on_active_speaker_setup_timeout(
 
     assert elapsed < 0.05
     assert "Active speaker observer setup timed out" in caplog.text
+
+
+def test_google_meet_check_joined_bounds_slow_visibility_probes(monkeypatch) -> None:
+    google_meet_module = _load_google_meet_module()
+    monkeypatch.setattr(google_meet_module, "_DIAGNOSTIC_STEP_DEADLINE_SECONDS", 0.01)
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _SlowJoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <main>
+              <div>No one else is here yet</div>
+            </main>
+          </body>
+        </html>
+        """,
+        delay_seconds=0.05,
+    )
+
+    started_at = time.monotonic()
+    result = asyncio.run(controller._check_joined(page, timeout=0.2))
+    elapsed = time.monotonic() - started_at
+
+    assert result is True
+    assert elapsed < 0.15
