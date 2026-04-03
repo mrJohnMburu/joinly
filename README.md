@@ -84,6 +84,50 @@ docker run --env-file .env ghcr.io/joinly-ai/joinly:latest --client <MeetingURL>
 ```
 > :red_circle: Having trouble getting started? Let's figure it out together on our [discord](https://discord.com/invite/AN5NEBkS4d)! 
 
+# :satellite: OpenClaw on Raspberry Pi
+If you want OpenClaw to be the agent runtime and Joinly to stay focused on browser meeting access, use the `openclaw-pi` deployment profile from this fork. It keeps Joinly in server mode, uses lower-resource browser defaults, and avoids bundling local Whisper/Kokoro/Silero assets into the image.
+
+> [!IMPORTANT]
+> The `openclaw-pi` profile defaults to `--vad webrtc --stt deepgram --tts deepgram`, so set `DEEPGRAM_API_KEY` in your `.env` file. You can still override the providers at runtime, for example with `--stt google --tts google`.
+
+For a native install on the Pi, you can now avoid the local Whisper/Kokoro/Silero stack entirely:
+```bash
+uv sync --extra openclaw-pi
+uv run joinly --profile openclaw-pi --host 0.0.0.0 --port 8000
+```
+
+Build the dedicated image from this fork:
+```bash
+docker build -f docker/Dockerfile.openclaw -t joinly-openclaw:local .
+```
+
+Run Joinly as a streamable HTTP MCP server on the Pi:
+```bash
+docker run --env-file .env -p 8000:8000 joinly-openclaw:local
+```
+
+Then register the Pi-hosted Joinly server with OpenClaw:
+```bash
+openclaw mcp set joinly '{"url":"http://<pi-host>:8000/mcp/","transport":"streamable-http"}'
+```
+
+Joinly should stay in server mode in this setup. OpenClaw becomes the MCP client that connects to `http://<pi-host>:8000/mcp/` and decides when to call tools like `join_meeting`, `get_transcript`, `speak_text`, and `send_chat_message`.
+
+To benchmark idle startup and memory on the Pi after a native install, use the built-in process-tree benchmark helper:
+```bash
+uv run python -m joinly.diagnostics.process_benchmark \
+  --probe-url http://127.0.0.1:8000/health \
+  --post-ready-seconds 15 \
+  -- joinly --profile openclaw-pi --host 0.0.0.0 --port 8000
+```
+
+If Joinly is already running and you want to sample the whole process tree during a live meeting, pass the root PID instead:
+```bash
+uv run python -m joinly.diagnostics.process_benchmark \
+  --pid <joinly-pid> \
+  --duration-seconds 30
+```
+
 # :technologist: Run an external client
 In Quickstart, we ran the Docker Container directly as a client using `--client`. But we can also run it as a server and connect to it from outside the container, which allows us to connect other MCP servers. Here, we run an external client using the [joinly-client package](https://pypi.org/project/joinly-client/) and connect it to the joinly MCP server.
 
@@ -143,6 +187,9 @@ In general, the docker image provides an MCP server which is started by default.
 ```bash
 # Start directly as client; default is as server, to which an external client can connect
 --client <MeetingUrl>
+
+# Apply the low-resource OpenClaw Raspberry Pi profile
+--profile openclaw-pi
 
 # Change participant name (default: joinly)
 --name "AI Assistant"
@@ -245,6 +292,11 @@ For development we recommend using the development container, which installs all
 The installation can take some time, since it downloads all packages as well as models for Whisper/Kokoro and the Chromium browser. At the end, it automatically invokes the [download_assets.py](scripts/download_assets.py) script. If you see errors like `Missing kokoro-v1.0.onnx`, run this script manually using:
 ```bash
 uv run scripts/download_assets.py
+```
+
+If you want to work on the full stack outside the devcontainer, install the optional extras explicitly:
+```bash
+uv sync --frozen --extra browser --extra local-audio --extra remote-audio --extra client
 ```
 
 We'd love to see what you are using it for or building with it. Showcase your work on our [discord](https://discord.com/invite/AN5NEBkS4d)

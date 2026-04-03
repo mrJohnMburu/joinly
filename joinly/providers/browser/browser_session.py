@@ -19,18 +19,34 @@ _CDP_RE = re.compile(r"DevTools listening on (ws://.*)")
 class BrowserSession:
     """A class to represent a browser session using Playwright."""
 
-    def __init__(self, *, env: dict[str, str] | None = None, cdp_port: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        env: dict[str, str] | None = None,
+        cdp_port: int = 0,
+        executable_path: str | Path | None = None,
+        profile_dir: str | Path | None = None,
+    ) -> None:
         """Initialize the browser params.
 
         Args:
             env: Environment variables to set for the browser (default: None)
             cdp_port (int): The port for the CDP connection (default: 0, auto-assign)
+            executable_path: Optional browser executable path. Uses the Playwright
+                Chromium binary when not provided.
+            profile_dir: Optional browser profile directory. When provided, it is
+                reused across runs instead of creating a temporary profile.
         """
         self._env: dict[str, str] = env if env is not None else os.environ.copy()
         self._cdp_port: int = cdp_port
+        self._executable_path = Path(executable_path).expanduser() if executable_path else None
+        self._persistent_profile_dir = (
+            Path(profile_dir).expanduser() if profile_dir else None
+        )
 
         self._proc: asyncio.subprocess.Process | None = None
         self._profile_dir: tempfile.TemporaryDirectory | None = None
+        self._profile_path: Path | None = None
         self._playwright: Playwright | None = None
         self._pw_browser: PlaywrightBrowser | None = None
         self._pw_context: BrowserContext | None = None
@@ -38,25 +54,43 @@ class BrowserSession:
         self._pages = list[Page]()
         self.cdp_url: str | None = None
 
+    def _get_browser_executable_path(self) -> Path:
+        if self._executable_path is not None:
+            return self._executable_path
+        if self._playwright is None:
+            msg = "Playwright is not initialized."
+            raise RuntimeError(msg)
+        return Path(self._playwright.chromium.executable_path)
+
+    def _get_profile_dir(self) -> Path:
+        if self._persistent_profile_dir is not None:
+            self._persistent_profile_dir.mkdir(parents=True, exist_ok=True)
+            self._profile_path = self._persistent_profile_dir
+            return self._persistent_profile_dir
+
+        self._profile_dir = tempfile.TemporaryDirectory(prefix="pw-profile_")
+        self._profile_path = Path(self._profile_dir.name)
+        return self._profile_path
+
     async def __aenter__(self) -> Self:
         """Start and connect to the Playwright browser."""
         self._playwright = await async_playwright().start()
 
-        bin_path = Path(self._playwright.chromium.executable_path)
+        bin_path = self._get_browser_executable_path()
         logger.debug("Chromium binary path: %s", bin_path)
         if not bin_path.exists():
             msg = "Chromium binary not found"
             logger.error(msg)
             raise RuntimeError(msg)
 
-        self._profile_dir = tempfile.TemporaryDirectory(prefix="pw-profile_")
-        logger.debug("Profile directory created at: %s", self._profile_dir.name)
+        profile_dir = self._get_profile_dir()
+        logger.debug("Profile directory ready at: %s", profile_dir)
 
         logger.debug("Launching Chromium browser.")
         self._proc = await asyncio.create_subprocess_exec(
             str(bin_path),
             f"--remote-debugging-port={self._cdp_port}",
-            f"--user-data-dir={self._profile_dir.name}",
+            f"--user-data-dir={profile_dir}",
             "--use-fake-ui-for-media-stream",
             "--alsa-output-device=pulse",
             f"--alsa-input-device={self._env.get('PULSE_SOURCE')}",
@@ -143,6 +177,7 @@ class BrowserSession:
         self._playwright = None
         self._proc = None
         self._profile_dir = None
+        self._profile_path = None
         self._default_page = None
         self._pages = []
         self.cdp_url = None

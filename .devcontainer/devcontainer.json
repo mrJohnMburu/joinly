@@ -28,7 +28,7 @@
         "UV_LINK_MODE": "copy",
         "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venv"
     },
-    "postCreateCommand": "uv sync --frozen && uv run scripts/download_assets.py",
+    "postCreateCommand": "uv sync --frozen --extra browser --extra local-audio --extra remote-audio --extra client && uv run scripts/download_assets.py",
     "postStartCommand": "uv run pre-commit install",
     "remoteUser": "vscode"
 }

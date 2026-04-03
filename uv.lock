@@ -1051,26 +1051,86 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "click" },
+    { name = "fastmcp" },
+    { name = "joinly-common" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "semchunk" },
+]
+
+[package.optional-dependencies]
+browser = [
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "playwright" },
+]
+client = [
+    { name = "joinly-client" },
+]
+cuda = [
+    { name = "onnxruntime-gpu" },
+]
+full = [
     { name = "deepgram-sdk" },
     { name = "elevenlabs" },
     { name = "faster-whisper" },
-    { name = "fastmcp" },
     { name = "google-genai" },
     { name = "joinly-client" },
-    { name = "joinly-common" },
     { name = "kokoro-onnx" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "pillow" },
     { name = "playwright" },
-    { name = "python-dotenv" },
-    { name = "semchunk" },
     { name = "webrtcvad-wheels" },
 ]
-
-[package.optional-dependencies]
-cuda = [
-    { name = "onnxruntime-gpu" },
+local-audio = [
+    { name = "faster-whisper" },
+    { name = "kokoro-onnx" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+]
+openclaw-pi = [
+    { name = "deepgram-sdk" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "playwright" },
+    { name = "webrtcvad-wheels" },
+]
+remote-audio = [
+    { name = "deepgram-sdk" },
+    { name = "elevenlabs" },
+    { name = "google-genai" },
+    { name = "webrtcvad-wheels" },
+]
+stt-deepgram = [
+    { name = "deepgram-sdk" },
+]
+stt-google = [
+    { name = "google-genai" },
+]
+stt-whisper = [
+    { name = "faster-whisper" },
+    { name = "numpy" },
+]
+tts-deepgram = [
+    { name = "deepgram-sdk" },
+]
+tts-elevenlabs = [
+    { name = "elevenlabs" },
+]
+tts-google = [
+    { name = "google-genai" },
+]
+tts-kokoro = [
+    { name = "kokoro-onnx" },
+]
+vad-silero = [
+    { name = "numpy" },
+    { name = "onnxruntime" },
+]
+vad-webrtc = [
+    { name = "webrtcvad-wheels" },
 ]
 
 [package.dev-dependencies]
@@ -1090,24 +1150,54 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.18" },
     { name = "click", specifier = ">=8.1.8" },
-    { name = "deepgram-sdk", specifier = ">=4.1.1" },
-    { name = "elevenlabs", specifier = ">=2.5.0" },
-    { name = "faster-whisper", specifier = ">=1.1.1" },
+    { name = "deepgram-sdk", marker = "extra == 'full'", specifier = ">=4.1.1" },
+    { name = "deepgram-sdk", marker = "extra == 'openclaw-pi'", specifier = ">=4.1.1" },
+    { name = "deepgram-sdk", marker = "extra == 'remote-audio'", specifier = ">=4.1.1" },
+    { name = "deepgram-sdk", marker = "extra == 'stt-deepgram'", specifier = ">=4.1.1" },
+    { name = "deepgram-sdk", marker = "extra == 'tts-deepgram'", specifier = ">=4.1.1" },
+    { name = "elevenlabs", marker = "extra == 'full'", specifier = ">=2.5.0" },
+    { name = "elevenlabs", marker = "extra == 'remote-audio'", specifier = ">=2.5.0" },
+    { name = "elevenlabs", marker = "extra == 'tts-elevenlabs'", specifier = ">=2.5.0" },
+    { name = "faster-whisper", marker = "extra == 'full'", specifier = ">=1.1.1" },
+    { name = "faster-whisper", marker = "extra == 'local-audio'", specifier = ">=1.1.1" },
+    { name = "faster-whisper", marker = "extra == 'stt-whisper'", specifier = ">=1.1.1" },
     { name = "fastmcp", specifier = ">=2.10.5" },
-    { name = "google-genai", specifier = ">=1.30.0" },
-    { name = "joinly-client", editable = "client" },
+    { name = "google-genai", marker = "extra == 'full'", specifier = ">=1.30.0" },
+    { name = "google-genai", marker = "extra == 'remote-audio'", specifier = ">=1.30.0" },
+    { name = "google-genai", marker = "extra == 'stt-google'", specifier = ">=1.30.0" },
+    { name = "google-genai", marker = "extra == 'tts-google'", specifier = ">=1.30.0" },
+    { name = "joinly-client", marker = "extra == 'client'", editable = "client" },
+    { name = "joinly-client", marker = "extra == 'full'", editable = "client" },
     { name = "joinly-common", editable = "common" },
-    { name = "kokoro-onnx", specifier = ">=0.4.9" },
-    { name = "numpy", specifier = ">=2.2.4" },
-    { name = "onnxruntime", specifier = ">=1.21.1" },
+    { name = "kokoro-onnx", marker = "extra == 'full'", specifier = ">=0.4.9" },
+    { name = "kokoro-onnx", marker = "extra == 'local-audio'", specifier = ">=0.4.9" },
+    { name = "kokoro-onnx", marker = "extra == 'tts-kokoro'", specifier = ">=0.4.9" },
+    { name = "numpy", marker = "extra == 'browser'", specifier = ">=2.2.4" },
+    { name = "numpy", marker = "extra == 'full'", specifier = ">=2.2.4" },
+    { name = "numpy", marker = "extra == 'local-audio'", specifier = ">=2.2.4" },
+    { name = "numpy", marker = "extra == 'openclaw-pi'", specifier = ">=2.2.4" },
+    { name = "numpy", marker = "extra == 'stt-whisper'", specifier = ">=2.2.4" },
+    { name = "numpy", marker = "extra == 'vad-silero'", specifier = ">=2.2.4" },
+    { name = "onnxruntime", marker = "extra == 'full'", specifier = ">=1.21.1" },
+    { name = "onnxruntime", marker = "extra == 'local-audio'", specifier = ">=1.21.1" },
+    { name = "onnxruntime", marker = "extra == 'vad-silero'", specifier = ">=1.21.1" },
     { name = "onnxruntime-gpu", marker = "extra == 'cuda'", specifier = ">=1.22.0" },
-    { name = "pillow", specifier = ">=11.3.0" },
-    { name = "playwright", specifier = "==1.58.0" },
+    { name = "pillow", marker = "extra == 'browser'", specifier = ">=11.3.0" },
+    { name = "pillow", marker = "extra == 'full'", specifier = ">=11.3.0" },
+    { name = "pillow", marker = "extra == 'openclaw-pi'", specifier = ">=11.3.0" },
+    { name = "playwright", marker = "extra == 'browser'", specifier = "==1.58.0" },
+    { name = "playwright", marker = "extra == 'full'", specifier = "==1.58.0" },
+    { name = "playwright", marker = "extra == 'openclaw-pi'", specifier = "==1.58.0" },
+    { name = "pydantic", specifier = ">=2.11.0" },
+    { name = "pydantic-settings", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "semchunk", specifier = ">=3.2.1" },
-    { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
+    { name = "webrtcvad-wheels", marker = "extra == 'full'", specifier = ">=2.0.14" },
+    { name = "webrtcvad-wheels", marker = "extra == 'openclaw-pi'", specifier = ">=2.0.14" },
+    { name = "webrtcvad-wheels", marker = "extra == 'remote-audio'", specifier = ">=2.0.14" },
+    { name = "webrtcvad-wheels", marker = "extra == 'vad-webrtc'", specifier = ">=2.0.14" },
 ]
-provides-extras = ["cuda"]
+provides-extras = ["browser", "vad-webrtc", "vad-silero", "stt-whisper", "stt-deepgram", "stt-google", "tts-kokoro", "tts-deepgram", "tts-google", "tts-elevenlabs", "client", "local-audio", "remote-audio", "openclaw-pi", "full", "cuda"]
 
 [package.metadata.requires-dev]
 dev = [

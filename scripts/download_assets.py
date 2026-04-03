@@ -6,6 +6,8 @@ import subprocess
 import sys
 import urllib.request
 
+from joinly.profiles import get_profile_assets, profile_names
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -108,11 +110,17 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Download assets for the project.")
     parser.add_argument(
+        "--profile",
+        choices=profile_names(),
+        default=None,
+        help="Download the asset bundle required by a named deployment profile.",
+    )
+    parser.add_argument(
         "--assets",
         nargs="*",
         choices=["playwright", "whisper", "kokoro", "silero", "all"],
-        default=["all"],
-        help="Specify which assets to download (default: all)",
+        default=None,
+        help="Specify which assets to download. Overrides --profile.",
     )
     parser.add_argument(
         "--whisper-model",
@@ -127,7 +135,7 @@ def main() -> None:
     """Download assets for the project."""
     args = parse_args()
 
-    assets = args.assets
+    assets = args.assets or list(get_profile_assets(args.profile)) or ["all"]
 
     if "playwright" in assets or "all" in assets:
         download_playwright()

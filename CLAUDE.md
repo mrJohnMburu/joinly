@@ -10,7 +10,7 @@ joinly is a Python middleware that enables AI agents to join and participate in 
 
 ```bash
 # Install all dependencies (run from repo root)
-uv sync --frozen
+uv sync --frozen --extra browser --extra local-audio --extra remote-audio --extra client
 
 # Download required ML models (Silero VAD, Whisper, Kokoro TTS)
 uv run scripts/download_assets.py

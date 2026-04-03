@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import click
 from dotenv import load_dotenv
 
+from joinly.profiles import apply_profile_defaults, profile_names
 from joinly.server import mcp
 from joinly.settings import Settings, set_settings
 from joinly.utils.logging import configure_logging
@@ -150,6 +151,15 @@ def _parse_mcp(
     show_default=True,
     show_envvar=True,
     envvar="JOINLY_PROMPT_STYLE",
+)
+@click.option(
+    "--profile",
+    "deployment_profile",
+    type=click.Choice(profile_names(), case_sensitive=False),
+    help="Apply a named deployment profile with low-friction runtime defaults.",
+    default=None,
+    show_envvar=True,
+    envvar="JOINLY_PROFILE",
 )
 @click.option(
     "--name-trigger",
@@ -316,6 +326,7 @@ def cli(  # noqa: PLR0913
     port: int,
     llm_provider: str,
     llm_model: str,
+    deployment_profile: str | None,
     vnc_server: bool,
     vnc_server_port: int,
     prompt: str | None,
@@ -330,6 +341,20 @@ def cli(  # noqa: PLR0913
     **cli_settings: Any,  # noqa: ANN401
 ) -> None:
     """Start joinly MCP server or server + client to join meetings."""
+    ctx = click.get_current_context()
+    cli_settings = apply_profile_defaults(
+        cli_settings,
+        deployment_profile,
+        {
+            key: (
+                source.name
+                if (source := ctx.get_parameter_source(key)) is not None
+                else None
+            )
+            for key in cli_settings
+        },
+    )
+
     if cli_settings.get("meeting_provider") == "browser" and vnc_server:
         cli_settings["meeting_provider_args"] = cli_settings.get(
             "meeting_provider_args", {}
@@ -349,7 +374,16 @@ def cli(  # noqa: PLR0913
     if server is True or (server is None and meeting_url is None):
         mcp.run(transport="streamable-http", host=host, port=port, show_banner=False)
     else:
-        import joinly_client
+        try:
+            import joinly_client
+        except ModuleNotFoundError as exc:
+            if exc.name != "joinly_client":
+                raise
+            msg = (
+                "Install the optional client dependencies to use --client. "
+                "For example: uv sync --extra client or pip install 'joinly[client]'."
+            )
+            raise click.UsageError(msg) from exc
 
         if not meeting_url:
             msg = (

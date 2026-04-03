@@ -79,6 +79,9 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         snapshot_size: tuple[int, int] = (512, 288),
         vnc_server: bool = False,
         vnc_server_port: int = 5900,
+        browser_executable_path: str | None = None,
+        browser_profile_dir: str | None = None,
+        audio_only: bool = False,
     ) -> None:
         """Initialize the browser meeting provider.
 
@@ -93,9 +96,15 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
                 (default is (512, 288)).
             vnc_server (bool): Whether to start a VNC server for the virtual display.
             vnc_server_port (int): The port to use for the VNC server.
+            browser_executable_path: Optional browser executable path. When not
+                provided, the Playwright Chromium binary is used.
+            browser_profile_dir: Optional persistent browser profile directory.
+            audio_only: Whether to disable camera/UI features and run as an
+                audio-first meeting participant.
         """
         self.snapshot_size = snapshot_size
         self._display_size = display_size
+        self._audio_only = audio_only
         self._env = os.environ.copy()
         self._pulse_server = PulseServer(env=self._env)
         self._virtual_display = VirtualDisplay(
@@ -114,7 +123,11 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             if not writer_byte_depth
             else VirtualMicrophone(env=self._env, byte_depth=writer_byte_depth)
         )
-        self._browser_session = BrowserSession(env=self._env)
+        self._browser_session = BrowserSession(
+            env=self._env,
+            executable_path=browser_executable_path,
+            profile_dir=browser_profile_dir,
+        )
         self._services = [
             self._pulse_server,
             self._virtual_display,
@@ -130,7 +143,9 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         self._stack = AsyncExitStack()
         self._lock = asyncio.Lock()
 
-        self._camera_feed = CameraFeed(self._virtual_microphone)
+        self._camera_feed = (
+            None if self._audio_only else CameraFeed(self._virtual_microphone)
+        )
         self._speaker_injected_virtual_speaker = _SpeakerInjectedAudioReader(
             self._virtual_speaker,
             lambda: (
@@ -148,7 +163,11 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
     @property
     def audio_writer(self) -> AudioWriter:
         """Get the audio writer."""
-        return self._camera_feed.audio_writer
+        return (
+            self._virtual_microphone
+            if self._camera_feed is None
+            else self._camera_feed.audio_writer
+        )
 
     @property
     def video_reader(self) -> VideoReader:
@@ -268,7 +287,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             raise RuntimeError(msg)
 
         self._page = await self._browser_session.get_page()
-        await self._camera_feed.install(self._page)
+        if self._camera_feed is not None:
+            await self._camera_feed.install(self._page)
         try:
             self._platform_controller = await self._get_platform_controller(url)
         except RuntimeError:
@@ -302,7 +322,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
                 )
             finally:
                 self._platform_controller = None
-                await self._camera_feed.stop()
+                if self._camera_feed is not None:
+                    await self._camera_feed.stop()
                 await self._cleanup_content_page()
                 if self._page is not None and not self._page.is_closed():
                     await self._page.close()
@@ -357,6 +378,10 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         Args:
             url: URL to display while sharing.
         """
+        if self._audio_only:
+            msg = "Screen sharing is not supported in audio-only mode."
+            raise ProviderNotSupportedError(msg)
+
         if self._is_sharing:
             msg = (
                 "Already sharing screen. "
@@ -403,10 +428,14 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
 
     async def set_animation(self, animation: ActionAnimation | None) -> None:
         """Set an action animation on the camera feed."""
+        if self._camera_feed is None:
+            return
         self._camera_feed.set_effect(animation)
 
     async def update_ui(self, update: UIUpdate) -> None:
         """Update the UI on the camera feed."""
+        if self._camera_feed is None:
+            return
         if isinstance(update.content, UIAnimationContent):
             self._camera_feed.set_effect(update.content.animation)
         elif isinstance(update.content, UIHtmlContent):
@@ -418,6 +447,10 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         Returns:
             VideoSnapshot: The snapshot of the current video frame.
         """
+        if self._audio_only:
+            msg = "Video snapshots are not supported in audio-only mode."
+            raise ProviderNotSupportedError(msg)
+
         if not self._page or self._page.is_closed():
             msg = "Cannot take snapshot. Not currently in a meeting."
             logger.error(msg)

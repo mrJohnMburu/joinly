@@ -1,15 +1,8 @@
 # Stage 1: Build environment
-FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04 AS builder
+FROM python:3.12-slim AS builder
 
 ENV UV_LINK_MODE="copy" \
     UV_COMPILE_BYTECODE=1
-
-# Install a Python 3.12 environment
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
 
 # Install uv (fast Python package manager)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -22,31 +15,28 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=client/pyproject.toml,target=client/pyproject.toml \
     --mount=type=bind,source=common/pyproject.toml,target=common/pyproject.toml \
-    uv sync --locked --no-install-project --no-install-workspace --no-dev --no-editable --extra full --extra cuda
+    uv sync --locked --no-install-project --no-install-workspace --no-dev --no-editable --extra openclaw-pi
 
 # Copy app source code
 COPY . /app
 
 # Install application into .venv (non-editable mode)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable --extra full --extra cuda
+    uv sync --locked --no-dev --no-editable --extra openclaw-pi
 
 # Stage 2: Runtime image
-FROM nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
+    JOINLY_PROFILE="openclaw-pi" \
     JOINLY_SERVER_HOST="0.0.0.0" \
     JOINLY_SERVER_PORT=8000 \
-    JOINLY_LOGGING_PLAIN=1 \
-    JOINLY_DEVICE="cuda" \
-    ONNX_PROVIDER=CUDAExecutionProvider
+    JOINLY_LOGGING_PLAIN=1
 
 EXPOSE 8000
 
 # Install system dependencies (for audio, video, browser, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
     libnss3 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
@@ -54,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcomposite1 \
     libxrandr2 \
     libgbm1 \
-    libasound2t64 \
+    libasound2 \
     libpangocairo-1.0-0 \
     libxdamage1 \
     libxfixes3 \
@@ -62,7 +52,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pulseaudio \
     pulseaudio-utils \
     xvfb \
-    x11vnc \
     && apt-get purge -y --auto-remove \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 
@@ -77,13 +66,10 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 USER app
 WORKDIR /app
 
-# Run download assets script to package all required assets
-# Note: this makes the image size very large, but has all assets on startup
+# Only the browser asset is required for the OpenClaw Pi profile.
 RUN --mount=type=bind,source=scripts/download_assets.py,target=download_assets.py \
     PATH="/app/.venv/bin:${PATH}" \
-    /app/.venv/bin/python download_assets.py \
-    --assets playwright whisper silero kokoro \
-    --whisper-model distil-large-v3
+    /app/.venv/bin/python download_assets.py --profile openclaw-pi
 
 # Set entrypoint
 ENTRYPOINT ["/app/.venv/bin/joinly"]

@@ -15,14 +15,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=client/pyproject.toml,target=client/pyproject.toml \
     --mount=type=bind,source=common/pyproject.toml,target=common/pyproject.toml \
-    uv sync --locked --no-install-project --no-install-workspace --no-dev --no-editable
+    uv sync --locked --no-install-project --no-install-workspace --no-dev --no-editable --extra full
 
 # Copy app source code
 COPY . /app
 
 # Install application into .venv (non-editable mode)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable --extra full
 
 # Stage 2: Runtime image
 FROM python:3.12-slim
