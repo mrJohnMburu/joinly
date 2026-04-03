@@ -193,6 +193,21 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
                 raise
         await self._capture_debug_snapshot(page, stage="post_click")
 
+        post_click_state = await self._classify_meeting_state(page)
+        if post_click_state == "preview":
+            logger.debug(
+                "Google Meet join: still in preview after click, retrying join button"
+            )
+            await page.wait_for_timeout(1000)
+            try:
+                await join_btn.click(timeout=10000)
+            except PlaywrightTimeoutError:
+                logger.debug(
+                    "Google Meet join: retry click timed out; continuing to "
+                    "post-click state checks"
+                )
+            await self._capture_debug_snapshot(page, stage="post_click_retry")
+
         if not await self._check_joined(page):
             await self._raise_if_access_denied(
                 page,
@@ -550,6 +565,15 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     }
 
     // --- Prejoin preview UI ---
+    const previewText = [
+        'ready to join',
+        'ask to join',
+        'other ways to join',
+    ];
+    for (const p of previewText) {
+        if (lower.includes(p)) return 'preview';
+    }
+
     const hasVisibleNameField = [...document.querySelectorAll(
         'input[placeholder], input[aria-label], textarea[placeholder], textarea[aria-label]'
     )].some(el => {

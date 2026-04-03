@@ -63,6 +63,9 @@ class _StubPage:
     def get_by_role(self, _role: str, *, name: object) -> _StubLocator:
         return self.join_button
 
+    async def wait_for_timeout(self, timeout: int) -> None:  # noqa: ARG002
+        await asyncio.sleep(0)
+
 
 class _TimeoutPage(_StubPage):
     def __init__(self) -> None:
@@ -313,6 +316,11 @@ class _JoinStatePage:
         "meeting code is invalid", "couldn't find the meeting",
         "this meeting has ended", "meeting has ended", "call has ended",
     )
+    _PREVIEW_TEXT_SUBSTRINGS = (
+        "ready to join",
+        "ask to join",
+        "other ways to join",
+    )
 
     def __init__(
         self,
@@ -367,6 +375,10 @@ class _JoinStatePage:
 
         if self._preview_visible:
             return "preview"
+
+        for p in self._PREVIEW_TEXT_SUBSTRINGS:
+            if p in lower:
+                return "preview"
 
         for w in self._WAITING_SUBSTRINGS:
             if w in lower:
@@ -695,6 +707,46 @@ def test_google_meet_join_retries_with_forced_click_when_primary_click_times_out
     ]
 
 
+def test_google_meet_join_retries_click_when_post_click_state_is_still_preview(
+    monkeypatch,
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _StubPage()
+
+    states = iter(["preview", "preview"])
+
+    async def _classify_meeting_state(_page: object) -> str:
+        return next(states)
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_classify_meeting_state", _classify_meeting_state)
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.join_button.click_calls == [
+        {"timeout": 5000},
+        {"timeout": 10000},
+    ]
+
+
 def test_google_meet_join_runs_configured_preflight_urls_before_target_navigation(
     monkeypatch,
 ) -> None:
@@ -902,7 +954,7 @@ def test_google_meet_join_reports_terminal_failure_after_post_click_check(
     async def _check_joined(_page: object) -> bool:
         return False
 
-    states = iter(["preview", "failed"])
+    states = iter(["preview", "preview", "failed"])
 
     async def _classify_meeting_state(_page: object) -> str:
         return next(states)
@@ -1250,6 +1302,32 @@ def test_google_meet_classify_state_returns_shell_active() -> None:
     result = asyncio.run(controller._classify_meeting_state(page))
 
     assert result == "shell_active"
+
+
+def test_google_meet_classify_state_keeps_signed_in_preview_out_of_shell_active() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <div data-in-call="true"></div>
+            <main>
+              <div>Ready to join?</div>
+              <button>Ask to join</button>
+              <button>Other ways to join</button>
+            </main>
+          </body>
+        </html>
+        """,
+        visible_button_labels=(),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "preview"
 
 
 def test_google_meet_check_joined_wakes_shell_active_ui_to_validate_controls() -> None:
