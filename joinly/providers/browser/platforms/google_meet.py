@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import tempfile
@@ -74,10 +75,14 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         self,
         *,
         navigation_preflight_urls: tuple[str, ...] = (),
+        debug_artifact_dir: str | None = None,
     ) -> None:
         """Initialize the Google Meet browser platform controller."""
         self._state: dict[str, Any] = {}
         self._navigation_preflight_urls = tuple(navigation_preflight_urls)
+        self._debug_artifact_dir = (
+            Path(debug_artifact_dir) if debug_artifact_dir is not None else None
+        )
 
     @property
     def active_speaker(self) -> str | None:
@@ -130,9 +135,10 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         join_btn = page.get_by_role(
             "button", name=re.compile(r"^(?!.*other ways).*join.*$", re.IGNORECASE)
         )
+        await self._capture_debug_snapshot(page, stage="pre_click")
         logger.debug("Google Meet join: clicking join button")
         try:
-            await join_btn.click(timeout=1000)
+            await join_btn.click(timeout=10000, force=True, no_wait_after=True)
         except PlaywrightTimeoutError:
             await self._log_join_step_timeout(
                 page,
@@ -140,6 +146,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
                 step="join_button.click",
             )
             raise
+        await self._capture_debug_snapshot(page, stage="post_click")
 
         if not await self._check_joined(page):
             await self._log_join_step_timeout(
@@ -634,6 +641,66 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             title,
             screenshot_path,
             html_snippet,
+        )
+
+    async def _capture_debug_snapshot(self, page: Page, *, stage: str) -> None:
+        """Write optional debug artifacts for the current Meet page state."""
+        if self._debug_artifact_dir is None:
+            return
+
+        artifact_dir = self._debug_artifact_dir
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp_ms = int(time.time() * 1000)
+        stage_slug = re.sub(r"[^a-z0-9_-]+", "-", stage.lower()).strip("-") or "stage"
+        prefix = artifact_dir / f"joinly-google-meet-{timestamp_ms}-{stage_slug}"
+
+        screenshot_bytes = await self._read_page_diagnostic(
+            lambda: page.screenshot(type="png"),
+            fallback=None,
+        )
+        html_content = await self._read_page_diagnostic(
+            lambda: page.content(),
+            fallback="<unavailable>",
+        )
+        title = await self._read_page_diagnostic(
+            lambda: page.title(),
+            fallback="<unavailable>",
+        )
+        classified_state = await self._read_page_diagnostic(
+            lambda: self._classify_meeting_state(page),
+            fallback="unknown",
+        )
+
+        metadata = {
+            "stage": stage,
+            "captured_at_ms": timestamp_ms,
+            "current_url": getattr(page, "url", "<unavailable>"),
+            "title": title,
+            "classified_state": classified_state,
+        }
+
+        try:
+            if screenshot_bytes is not None:
+                prefix.with_suffix(".png").write_bytes(screenshot_bytes)
+            prefix.with_suffix(".html").write_text(html_content, encoding="utf-8")
+            prefix.with_suffix(".json").write_text(
+                json.dumps(metadata, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to write Google Meet debug artifacts for stage %s.",
+                stage,
+                exc_info=True,
+            )
+            return
+
+        logger.info(
+            "Captured Google Meet debug artifacts "
+            "(stage=%s artifact_prefix=%s)",
+            stage,
+            prefix,
         )
 
     @staticmethod

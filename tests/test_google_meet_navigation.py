@@ -16,13 +16,13 @@ class _StubPlaywrightTimeoutError(Exception):
 class _StubLocator:
     def __init__(self) -> None:
         self.fill_calls: list[tuple[str, int | None]] = []
-        self.click_calls: list[int | None] = []
+        self.click_calls: list[dict[str, object]] = []
 
     async def fill(self, value: str, timeout: int | None = None) -> None:
         self.fill_calls.append((value, timeout))
 
-    async def click(self, timeout: int | None = None) -> None:
-        self.click_calls.append(timeout)
+    async def click(self, timeout: int | None = None, **kwargs: object) -> None:
+        self.click_calls.append({"timeout": timeout, **kwargs})
 
 
 class _TimeoutFillLocator(_StubLocator):
@@ -119,6 +119,31 @@ class _JoinCheckFailurePage(_StubPage):
     async def screenshot(self, **kwargs: object) -> bytes:
         self.screenshot_calls.append(dict(kwargs))
         return b"png"
+
+
+class _DebugCapturePage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = "https://meet.google.com/test-call"
+        self.screenshot_calls: list[dict[str, object]] = []
+
+    async def title(self) -> str:
+        return "Meet"
+
+    async def content(self) -> str:
+        return """
+        <html>
+          <body>
+            <main>
+              <div>Ready to join</div>
+            </main>
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        return b"debug-png"
 
 
 class _SlowGotoPage(_StubPage):
@@ -393,7 +418,9 @@ def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkey
         ("https://meet.google.com/test-call", "commit", 20000)
     ]
     assert page.name_field.fill_calls == [("OpenClaw", 60000)]
-    assert page.join_button.click_calls == [1000]
+    assert page.join_button.click_calls == [
+        {"timeout": 10000, "force": True, "no_wait_after": True}
+    ]
 
 
 def test_google_meet_join_runs_configured_preflight_urls_before_target_navigation(
@@ -564,6 +591,47 @@ def test_google_meet_join_logs_state_when_post_click_join_check_fails(
     assert page.screenshot_calls
     assert "Google Meet join did not reach active or waiting state" in caplog.text
     assert "No one else is here yet" in caplog.text
+
+
+def test_google_meet_join_captures_debug_artifacts_when_configured(
+    monkeypatch, tmp_path
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController(
+        debug_artifact_dir=str(tmp_path)
+    )
+    page = _DebugCapturePage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.screenshot_calls == [{"type": "png"}, {"type": "png"}]
+    files = sorted(path.name for path in tmp_path.iterdir())
+    assert len(files) == 6
+    assert any(name.endswith("-pre_click.png") for name in files)
+    assert any(name.endswith("-pre_click.html") for name in files)
+    assert any(name.endswith("-pre_click.json") for name in files)
+    assert any(name.endswith("-post_click.png") for name in files)
+    assert any(name.endswith("-post_click.html") for name in files)
+    assert any(name.endswith("-post_click.json") for name in files)
 
 
 def test_google_meet_check_joined_accepts_waiting_room_text_state() -> None:

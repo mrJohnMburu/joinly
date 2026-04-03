@@ -83,6 +83,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         browser_profile_dir: str | None = None,
         browser_net_log_path: str | None = None,
         google_meet_preflight_urls: tuple[str, ...] = (),
+        google_meet_debug_artifact_dir: str | None = None,
         audio_only: bool = False,
     ) -> None:
         """Initialize the browser meeting provider.
@@ -104,6 +105,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             browser_net_log_path: Optional Chromium net log output path.
             google_meet_preflight_urls: Optional diagnostic URLs to probe before
                 navigating to the full Google Meet join URL.
+            google_meet_debug_artifact_dir: Optional directory for Google Meet
+                pre/post-click debug artifacts.
             audio_only: Whether to disable camera/UI features and run as an
                 audio-first meeting participant.
         """
@@ -111,6 +114,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         self._display_size = display_size
         self._audio_only = audio_only
         self._google_meet_preflight_urls = tuple(google_meet_preflight_urls)
+        self._google_meet_debug_artifact_dir = google_meet_debug_artifact_dir
         self._env = os.environ.copy()
         self._pulse_server = PulseServer(env=self._env)
         self._virtual_display = VirtualDisplay(
@@ -250,7 +254,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             if platform_controller_type.url_pattern.match(url):
                 if platform_controller_type is GoogleMeetBrowserPlatformController:
                     return platform_controller_type(
-                        navigation_preflight_urls=self._google_meet_preflight_urls
+                        navigation_preflight_urls=self._google_meet_preflight_urls,
+                        debug_artifact_dir=self._google_meet_debug_artifact_dir,
                     )
                 return platform_controller_type()
 

@@ -133,9 +133,15 @@ class _StubGoogleMeetController(_StubPlatformController):
     instances: list["_StubGoogleMeetController"] = []
     url_pattern = re.compile(r"https://meet\.google\.com/.*")
 
-    def __init__(self, *, navigation_preflight_urls: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        navigation_preflight_urls: tuple[str, ...] = (),
+        debug_artifact_dir: str | None = None,
+    ) -> None:
         super().__init__()
         self.navigation_preflight_urls = navigation_preflight_urls
+        self.debug_artifact_dir = debug_artifact_dir
 
 
 class _StubTeamsController(_StubPlatformController):
@@ -301,6 +307,7 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
             "https://www.google.com",
             "https://meet.google.com",
         ),
+        google_meet_debug_artifact_dir="/tmp/joinly-google-meet-debug",
     )
 
     async def scenario() -> None:
@@ -316,6 +323,9 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
     assert _StubGoogleMeetController.instances[0].navigation_preflight_urls == (
         "https://www.google.com",
         "https://meet.google.com",
+    )
+    assert _StubGoogleMeetController.instances[0].debug_artifact_dir == (
+        "/tmp/joinly-google-meet-debug"
     )
 
 

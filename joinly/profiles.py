@@ -33,6 +33,7 @@ _PROFILES: dict[str, DeploymentProfile] = {
                 "display_size": (1024, 576),
                 "snapshot_size": (384, 216),
                 "browser_net_log_path": "/tmp/joinly-chromium-netlog.json",
+                "google_meet_debug_artifact_dir": "/tmp/joinly-google-meet-debug",
                 "google_meet_preflight_urls": (
                     "https://www.google.com",
                     "https://meet.google.com",
