@@ -133,6 +133,10 @@ class _StubGoogleMeetController(_StubPlatformController):
     instances: list["_StubGoogleMeetController"] = []
     url_pattern = re.compile(r"https://meet\.google\.com/.*")
 
+    def __init__(self, *, navigation_preflight_urls: tuple[str, ...] = ()) -> None:
+        super().__init__()
+        self.navigation_preflight_urls = navigation_preflight_urls
+
 
 class _StubTeamsController(_StubPlatformController):
     instances: list["_StubTeamsController"] = []
@@ -283,6 +287,36 @@ def test_audio_only_provider_skips_camera_feed_and_uses_microphone_writer(
         ("https://meet.google.com/test-call", "OpenClaw", None)
     ]
     assert _StubGoogleMeetController.instances[0].leave_calls == 1
+
+
+def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
+    monkeypatch,
+) -> None:
+    _reset_stubs()
+    meeting_provider_module = _load_meeting_provider_module(monkeypatch)
+    provider = meeting_provider_module.BrowserMeetingProvider(
+        audio_only=True,
+        browser_net_log_path="/tmp/joinly-chromium-netlog.json",
+        google_meet_preflight_urls=(
+            "https://www.google.com",
+            "https://meet.google.com",
+        ),
+    )
+
+    async def scenario() -> None:
+        await provider.join("https://meet.google.com/test-call", "OpenClaw")
+        await provider.leave()
+
+    asyncio.run(scenario())
+
+    assert provider._browser_session.kwargs["net_log_path"] == (
+        "/tmp/joinly-chromium-netlog.json"
+    )
+    assert len(_StubGoogleMeetController.instances) == 1
+    assert _StubGoogleMeetController.instances[0].navigation_preflight_urls == (
+        "https://www.google.com",
+        "https://meet.google.com",
+    )
 
 
 def test_audio_only_provider_rejects_video_features(monkeypatch) -> None:

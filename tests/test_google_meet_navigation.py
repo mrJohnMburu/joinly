@@ -228,6 +228,46 @@ def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkey
     assert page.join_button.click_calls == [1000]
 
 
+def test_google_meet_join_runs_configured_preflight_urls_before_target_navigation(
+    monkeypatch,
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController(
+        navigation_preflight_urls=(
+            "https://www.google.com",
+            "https://meet.google.com",
+        )
+    )
+    page = _StubPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.goto_calls == [
+        ("https://www.google.com", "domcontentloaded", 10000),
+        ("https://meet.google.com", "domcontentloaded", 10000),
+        ("https://meet.google.com/test-call", "commit", 20000),
+    ]
+
+
 def test_google_meet_join_logs_navigation_timeout_context(caplog) -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()

@@ -12,6 +12,11 @@ def test_openclaw_pi_profile_uses_remote_audio_defaults() -> None:
         "audio_only": True,
         "display_size": (1024, 576),
         "snapshot_size": (384, 216),
+        "browser_net_log_path": "/tmp/joinly-chromium-netlog.json",
+        "google_meet_preflight_urls": (
+            "https://www.google.com",
+            "https://meet.google.com",
+        ),
     }
 
 
@@ -38,6 +43,11 @@ def test_apply_profile_defaults_only_overrides_defaulted_values() -> None:
         "audio_only": True,
         "display_size": (1024, 576),
         "snapshot_size": (512, 288),
+        "browser_net_log_path": "/tmp/joinly-chromium-netlog.json",
+        "google_meet_preflight_urls": (
+            "https://www.google.com",
+            "https://meet.google.com",
+        ),
     }
 
 

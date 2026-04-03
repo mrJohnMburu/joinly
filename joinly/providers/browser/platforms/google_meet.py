@@ -23,6 +23,8 @@ _MAX_NAVIGATION_HTML_LOG_CHARS = 240
 _NAVIGATION_TIMEOUT_MS = 20000
 _NAVIGATION_STEP_DEADLINE_SECONDS = 25.0
 _DIAGNOSTIC_STEP_DEADLINE_SECONDS = 1.0
+_PREFLIGHT_NAVIGATION_TIMEOUT_MS = 10000
+_PREFLIGHT_STEP_DEADLINE_SECONDS = 12.0
 
 _T = TypeVar("_T")
 
@@ -34,9 +36,14 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         r"^(?:https?://)?(?:www\.)?meet\.google\.com/"
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        navigation_preflight_urls: tuple[str, ...] = (),
+    ) -> None:
         """Initialize the Google Meet browser platform controller."""
         self._state: dict[str, Any] = {}
+        self._navigation_preflight_urls = tuple(navigation_preflight_urls)
 
     @property
     def active_speaker(self) -> str | None:
@@ -58,11 +65,15 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             name: The name of the participant.
             passcode: The passcode for the meeting (if required).
         """
+        await self._run_navigation_preflight(page)
         logger.debug("Google Meet join: navigating to %s", url)
         try:
-            await asyncio.wait_for(
-                page.goto(url, wait_until="commit", timeout=_NAVIGATION_TIMEOUT_MS),
-                timeout=_NAVIGATION_STEP_DEADLINE_SECONDS,
+            await self._goto_with_deadline(
+                page,
+                url=url,
+                wait_until="commit",
+                timeout_ms=_NAVIGATION_TIMEOUT_MS,
+                deadline_seconds=_NAVIGATION_STEP_DEADLINE_SECONDS,
             )
         except (PlaywrightTimeoutError, TimeoutError):
             await self._log_navigation_timeout(page, target_url=url)
@@ -360,11 +371,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         """Log browser state when a Google Meet join step stalls."""
         current_url = getattr(page, "url", "<unavailable>")
         title = await self._read_page_diagnostic(
-            page.title,
+            lambda: page.title(),
             fallback="<unavailable>",
         )
         html_content = await self._read_page_diagnostic(
-            page.content,
+            lambda: page.content(),
             fallback="<unavailable>",
         )
         html_snippet = self._summarize_html(html_content)
@@ -417,6 +428,61 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             )
         except Exception:
             return fallback
+
+    async def _run_navigation_preflight(self, page: Page) -> None:
+        """Probe a few simpler URLs before loading the full Meet join URL."""
+        for preflight_url in self._navigation_preflight_urls:
+            logger.debug("Google Meet preflight: navigating to %s", preflight_url)
+            try:
+                await self._goto_with_deadline(
+                    page,
+                    url=preflight_url,
+                    wait_until="domcontentloaded",
+                    timeout_ms=_PREFLIGHT_NAVIGATION_TIMEOUT_MS,
+                    deadline_seconds=_PREFLIGHT_STEP_DEADLINE_SECONDS,
+                )
+            except (PlaywrightTimeoutError, TimeoutError):
+                current_url = getattr(page, "url", "<unavailable>")
+                title = await self._read_page_diagnostic(
+                    lambda: page.title(),
+                    fallback="<unavailable>",
+                )
+                logger.warning(
+                    "Google Meet preflight failed "
+                    "(target_url=%s current_url=%s title=%r)",
+                    preflight_url,
+                    current_url,
+                    title,
+                )
+                continue
+
+            current_url = getattr(page, "url", "<unavailable>")
+            title = await self._read_page_diagnostic(
+                lambda: page.title(),
+                fallback="<unavailable>",
+            )
+            logger.debug(
+                "Google Meet preflight succeeded "
+                "(target_url=%s current_url=%s title=%r)",
+                preflight_url,
+                current_url,
+                title,
+            )
+
+    async def _goto_with_deadline(
+        self,
+        page: Page,
+        *,
+        url: str,
+        wait_until: str,
+        timeout_ms: int,
+        deadline_seconds: float,
+    ) -> None:
+        """Navigate with both Playwright and outer asyncio deadlines."""
+        await asyncio.wait_for(
+            page.goto(url, wait_until=wait_until, timeout=timeout_ms),
+            timeout=deadline_seconds,
+        )
 
     async def _open_chat(self, page: Page) -> None:
         """Open the chat in the Google Meet meeting."""

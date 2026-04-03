@@ -81,6 +81,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         vnc_server_port: int = 5900,
         browser_executable_path: str | None = None,
         browser_profile_dir: str | None = None,
+        browser_net_log_path: str | None = None,
+        google_meet_preflight_urls: tuple[str, ...] = (),
         audio_only: bool = False,
     ) -> None:
         """Initialize the browser meeting provider.
@@ -99,12 +101,16 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             browser_executable_path: Optional browser executable path. When not
                 provided, the Playwright Chromium binary is used.
             browser_profile_dir: Optional persistent browser profile directory.
+            browser_net_log_path: Optional Chromium net log output path.
+            google_meet_preflight_urls: Optional diagnostic URLs to probe before
+                navigating to the full Google Meet join URL.
             audio_only: Whether to disable camera/UI features and run as an
                 audio-first meeting participant.
         """
         self.snapshot_size = snapshot_size
         self._display_size = display_size
         self._audio_only = audio_only
+        self._google_meet_preflight_urls = tuple(google_meet_preflight_urls)
         self._env = os.environ.copy()
         self._pulse_server = PulseServer(env=self._env)
         self._virtual_display = VirtualDisplay(
@@ -127,6 +133,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             env=self._env,
             executable_path=browser_executable_path,
             profile_dir=browser_profile_dir,
+            net_log_path=browser_net_log_path,
         )
         self._services = [
             self._pulse_server,
@@ -241,6 +248,10 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         """
         for platform_controller_type in PLATFORMS:
             if platform_controller_type.url_pattern.match(url):
+                if platform_controller_type is GoogleMeetBrowserPlatformController:
+                    return platform_controller_type(
+                        navigation_preflight_urls=self._google_meet_preflight_urls
+                    )
                 return platform_controller_type()
 
         msg = (

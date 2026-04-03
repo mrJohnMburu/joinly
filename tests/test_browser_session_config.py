@@ -127,9 +127,11 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
     executable_path = tmp_path / "chromium"
     executable_path.write_text("")
     profile_dir = tmp_path / "persistent-profile"
+    net_log_path = tmp_path / "chromium-netlog.json"
     session = BrowserSession(
         executable_path=str(executable_path),
         profile_dir=str(profile_dir),
+        net_log_path=str(net_log_path),
     )
 
     async def scenario() -> None:
@@ -137,6 +139,8 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
         try:
             assert launched["args"][0] == str(executable_path)
             assert f"--user-data-dir={profile_dir}" in launched["args"]
+            assert f"--log-net-log={net_log_path}" in launched["args"]
+            assert "--net-log-capture-mode=Everything" in launched["args"]
             assert profile_dir.exists()
         finally:
             await session.__aexit__()

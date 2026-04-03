@@ -26,6 +26,7 @@ class BrowserSession:
         cdp_port: int = 0,
         executable_path: str | Path | None = None,
         profile_dir: str | Path | None = None,
+        net_log_path: str | Path | None = None,
     ) -> None:
         """Initialize the browser params.
 
@@ -36,6 +37,7 @@ class BrowserSession:
                 Chromium binary when not provided.
             profile_dir: Optional browser profile directory. When provided, it is
                 reused across runs instead of creating a temporary profile.
+            net_log_path: Optional Chromium net log output path.
         """
         self._env: dict[str, str] = env if env is not None else os.environ.copy()
         self._cdp_port: int = cdp_port
@@ -43,6 +45,7 @@ class BrowserSession:
         self._persistent_profile_dir = (
             Path(profile_dir).expanduser() if profile_dir else None
         )
+        self._net_log_path = Path(net_log_path).expanduser() if net_log_path else None
 
         self._proc: asyncio.subprocess.Process | None = None
         self._profile_dir: tempfile.TemporaryDirectory | None = None
@@ -85,9 +88,7 @@ class BrowserSession:
 
         profile_dir = self._get_profile_dir()
         logger.debug("Profile directory ready at: %s", profile_dir)
-
-        logger.debug("Launching Chromium browser.")
-        self._proc = await asyncio.create_subprocess_exec(
+        chromium_args = [
             str(bin_path),
             f"--remote-debugging-port={self._cdp_port}",
             f"--user-data-dir={profile_dir}",
@@ -114,6 +115,20 @@ class BrowserSession:
             "--force-device-scale-factor=1",
             "--disable-features=TranslateUI,MediaRouter,WebRtcAutomaticGainControl",
             "--disable-backgrounding-occluded-windows",
+        ]
+        if self._net_log_path is not None:
+            self._net_log_path.parent.mkdir(parents=True, exist_ok=True)
+            chromium_args.extend(
+                [
+                    f"--log-net-log={self._net_log_path}",
+                    "--net-log-capture-mode=Everything",
+                ]
+            )
+            logger.debug("Chromium net log path: %s", self._net_log_path)
+
+        logger.debug("Launching Chromium browser.")
+        self._proc = await asyncio.create_subprocess_exec(
+            *chromium_args,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=self._env,
