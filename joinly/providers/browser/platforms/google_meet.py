@@ -52,19 +52,40 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             name: The name of the participant.
             passcode: The passcode for the meeting (if required).
         """
+        logger.debug("Google Meet join: navigating to %s", url)
         try:
             await page.goto(url, wait_until="commit", timeout=20000)
         except PlaywrightTimeoutError:
             await self._log_navigation_timeout(page, target_url=url)
             raise
+        logger.debug("Google Meet join: navigation committed")
 
         name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
-        await name_field.fill(name, timeout=60000)
+        logger.debug("Google Meet join: waiting for guest name field")
+        try:
+            await name_field.fill(name, timeout=60000)
+        except PlaywrightTimeoutError:
+            await self._log_join_step_timeout(
+                page,
+                target_url=url,
+                step="name_field.fill",
+            )
+            raise
+        logger.debug("Google Meet join: guest name entered")
 
         join_btn = page.get_by_role(
             "button", name=re.compile(r"^(?!.*other ways).*join.*$", re.IGNORECASE)
         )
-        await join_btn.click(timeout=1000)
+        logger.debug("Google Meet join: clicking join button")
+        try:
+            await join_btn.click(timeout=1000)
+        except PlaywrightTimeoutError:
+            await self._log_join_step_timeout(
+                page,
+                target_url=url,
+                step="join_button.click",
+            )
+            raise
 
         if not await self._check_joined(page):
             msg = "Join check failed: Failed to join the Google Meet meeting."
@@ -312,6 +333,22 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
 
     async def _log_navigation_timeout(self, page: Page, *, target_url: str) -> None:
         """Log browser state when Google Meet navigation stalls."""
+        await self._log_join_step_timeout(
+            page,
+            target_url=target_url,
+            step="navigate",
+            message="Google Meet navigation timed out",
+        )
+
+    async def _log_join_step_timeout(
+        self,
+        page: Page,
+        *,
+        target_url: str,
+        step: str,
+        message: str = "Google Meet join step timed out",
+    ) -> None:
+        """Log browser state when a Google Meet join step stalls."""
         current_url = getattr(page, "url", "<unavailable>")
         title = "<unavailable>"
         html_snippet = "<unavailable>"
@@ -331,8 +368,10 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             await page.screenshot(path=screenshot_path, type="png")
 
         logger.error(
-            "Google Meet navigation timed out "
-            "(target_url=%s current_url=%s title=%r screenshot_path=%s html_snippet=%s)",
+            "%s "
+            "(step=%s target_url=%s current_url=%s title=%r screenshot_path=%s html_snippet=%s)",
+            message,
+            step,
             target_url,
             current_url,
             title,
