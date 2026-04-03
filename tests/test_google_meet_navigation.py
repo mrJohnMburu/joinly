@@ -15,10 +15,11 @@ class _StubPlaywrightTimeoutError(Exception):
 
 
 class _StubLocator:
-    def __init__(self, *, visible: bool = True) -> None:
+    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
         self.fill_calls: list[tuple[str, int | None]] = []
         self.click_calls: list[dict[str, object]] = []
         self.visible = visible
+        self.enabled = enabled
 
     async def fill(self, value: str, timeout: int | None = None) -> None:
         self.fill_calls.append((value, timeout))
@@ -28,6 +29,9 @@ class _StubLocator:
 
     async def is_visible(self) -> bool:
         return self.visible
+
+    async def is_enabled(self) -> bool:
+        return self.enabled
 
 
 class _TimeoutFillLocator(_StubLocator):
@@ -64,6 +68,19 @@ class _StubPage:
         return self.join_button
 
     async def wait_for_timeout(self, timeout: int) -> None:  # noqa: ARG002
+        await asyncio.sleep(0)
+
+
+class _EnableAfterWaitPage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.join_button = _StubLocator(enabled=False)
+        self._wait_calls = 0
+
+    async def wait_for_timeout(self, timeout: int) -> None:  # noqa: ARG002
+        self._wait_calls += 1
+        if self._wait_calls >= 1:
+            self.join_button.enabled = True
         await asyncio.sleep(0)
 
 
@@ -669,6 +686,36 @@ def test_google_meet_join_skips_guest_name_when_signed_in_preview_has_no_name_fi
 
     assert page.name_field.fill_calls == []
     assert page.join_button.click_calls == [{"timeout": 5000}]
+
+
+def test_google_meet_join_waits_for_join_button_to_become_enabled(monkeypatch) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _EnableAfterWaitPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.join_button.click_calls == [{"timeout": 5000}]
+    assert page._wait_calls == 1
 
 
 def test_google_meet_join_retries_with_forced_click_when_primary_click_times_out(

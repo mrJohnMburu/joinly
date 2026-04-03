@@ -32,6 +32,8 @@ _POST_CLICK_POLL_INTERVAL_MS = 500
 _CLASSIFY_STATE_TIMEOUT_SECONDS = 5.0
 _TRANSITIONING_SETTLE_COUNT = 3
 _ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS = 3.0
+_JOIN_BUTTON_READY_TIMEOUT_SECONDS = 10.0
+_JOIN_BUTTON_READY_POLL_INTERVAL_MS = 500
 _ACCESS_DENIED_MESSAGE = (
     "Google Meet denied access. The meeting may require the host to admit "
     "guests or a signed-in Google account."
@@ -178,6 +180,15 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             )
 
         await self._capture_debug_snapshot(page, stage="pre_click")
+        if not await self._wait_for_join_button_ready(join_btn, page, target_url=url):
+            await self._log_join_step_timeout(
+                page,
+                target_url=url,
+                step="join_button.ready",
+                message="Google Meet join button did not become enabled",
+            )
+            msg = "Join button never became enabled."
+            raise RuntimeError(msg)
         logger.debug("Google Meet join: clicking join button")
         try:
             await join_btn.click(timeout=5000)
@@ -524,6 +535,30 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             return True
         return False
 
+    async def _wait_for_join_button_ready(
+        self,
+        join_btn: Any,
+        page: Page,
+        *,
+        target_url: str,  # noqa: ARG002
+        timeout: float = _JOIN_BUTTON_READY_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Wait until the preview join button is both visible and enabled."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await self._locator_is_visible(join_btn) and await self._locator_is_enabled(
+                join_btn
+            ):
+                return True
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await page.wait_for_timeout(
+                min(_JOIN_BUTTON_READY_POLL_INTERVAL_MS, int(remaining * 1000))
+            )
+        return False
+
     async def _classify_meeting_state(self, page: Page) -> str:
         """Classify the current Google Meet page state via a single JS call.
 
@@ -726,6 +761,15 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         with contextlib.suppress(Exception):
             return await asyncio.wait_for(
                 locator.is_visible(),
+                timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
+            )
+        return False
+
+    async def _locator_is_enabled(self, locator: Any) -> bool:
+        """Safely check whether a locator is enabled."""
+        with contextlib.suppress(Exception):
+            return await asyncio.wait_for(
+                locator.is_enabled(),
                 timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
             )
         return False
