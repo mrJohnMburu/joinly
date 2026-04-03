@@ -441,6 +441,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         overhead for the DOM — it only returns a short state string.
 
         Returns one of:
+            ``"preview"``      – prejoin UI is still visible
             ``"active"``       – in-call controls visible (mic/leave buttons)
             ``"waiting"``      – waiting room / alone-in-room text present
             ``"failed"``       – terminal error text detected
@@ -452,6 +453,14 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     const lower = (document.body && document.body.innerText)
         ? document.body.innerText.toLowerCase()
         : '';
+    const isVisible = (el) => {
+        if (!el) return false;
+        if (el.offsetParent === null && el.getClientRects().length === 0) {
+            return false;
+        }
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    };
 
     // --- Terminal failure ---
     const failures = [
@@ -465,21 +474,6 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     ];
     for (const f of failures) {
         if (lower.includes(f)) return 'failed';
-    }
-
-    // --- Active meeting controls (in-call UI visible) ---
-    // Use offsetParent as a fast visibility proxy (null == hidden/display:none).
-    const activeLabels = [
-        /leave/i, /exit call/i, /hang up/i, /end call/i,
-        /turn off mic/i, /turn on mic/i,
-        /turn off camera/i, /turn on camera/i,
-    ];
-    for (const btn of document.querySelectorAll('button[aria-label]')) {
-        const label = btn.getAttribute('aria-label') || '';
-        if (btn.offsetParent !== null &&
-                activeLabels.some(rx => rx.test(label))) {
-            return 'active';
-        }
     }
 
     // --- Waiting room / alone-in-room ---
@@ -498,17 +492,42 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         if (lower.includes(w)) return 'waiting';
     }
 
-    // --- Transitioning: preview controls gone, in-call UI not yet visible ---
-    const hasNameField = !!document.querySelector(
-        'input[placeholder], input[aria-label]'
-    );
-    const hasJoinBtn = [...document.querySelectorAll('button')].some(b => {
-        const t = (b.textContent || '') + (b.getAttribute('aria-label') || '');
-        return /^(?!.*other ways).*join.*/i.test(t);
+    // --- Prejoin preview UI ---
+    const hasVisibleNameField = [...document.querySelectorAll(
+        'input[placeholder], input[aria-label], textarea[placeholder], textarea[aria-label]'
+    )].some(el => {
+        const label = `${el.getAttribute('placeholder') || ''} ${el.getAttribute('aria-label') || ''}`;
+        return isVisible(el) && /\bname\b/i.test(label);
     });
-    if (!hasNameField && !hasJoinBtn) return 'transitioning';
+    const hasVisibleNamePrompt = [...document.querySelectorAll(
+        'div, span, label, h1, h2, h3, p'
+    )].some(el => isVisible(el) && /what'?s your name?/i.test(el.textContent || ''));
+    const hasVisibleJoinBtn = [...document.querySelectorAll(
+        'button, [role="button"]'
+    )].some(el => {
+        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`;
+        return isVisible(el) && /^(?!.*other ways).*join.*/i.test(label.trim());
+    });
+    if (hasVisibleNameField || hasVisibleNamePrompt || hasVisibleJoinBtn) {
+        return 'preview';
+    }
 
-    return 'unknown';
+    // --- Active meeting controls (in-call UI visible) ---
+    const activeLabels = [
+        /leave/i, /exit call/i, /hang up/i, /end call/i,
+        /turn off mic/i, /turn on mic/i,
+        /turn off camera/i, /turn on camera/i,
+    ];
+    for (const btn of document.querySelectorAll('button[aria-label]')) {
+        const label = btn.getAttribute('aria-label') || '';
+        if (isVisible(btn) && activeLabels.some(rx => rx.test(label))) {
+            return 'active';
+        }
+    }
+
+    // --- Transitioning: preview controls gone, in-call UI not yet visible ---
+    return 'transitioning';
+
 }
 """
         try:

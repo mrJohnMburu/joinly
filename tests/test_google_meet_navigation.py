@@ -306,13 +306,16 @@ class _JoinStatePage:
             if f in lower:
                 return "failed"
 
-        for label in self._visible_button_labels:
-            if any(a in label.lower() for a in self._ACTIVE_CONTROL_SUBSTRINGS):
-                return "active"
+        if self._preview_visible:
+            return "preview"
 
         for w in self._WAITING_SUBSTRINGS:
             if w in lower:
                 return "waiting"
+
+        for label in self._visible_button_labels:
+            if any(a in label.lower() for a in self._ACTIVE_CONTROL_SUBSTRINGS):
+                return "active"
 
         if not self._preview_visible:
             return "transitioning"
@@ -347,6 +350,20 @@ class _SlowJoinStatePage(_JoinStatePage):
         """Slow variant: simulate an expensive evaluate() call on Pi."""
         await asyncio.sleep(self._delay_seconds)
         return await super().evaluate(expression)
+
+
+class _ClassifierScriptPage:
+    def __init__(self) -> None:
+        self.last_expression: object | None = None
+
+    async def evaluate(self, expression: object) -> str:
+        self.last_expression = expression
+        script = str(expression)
+        preview_idx = script.find("return 'preview'")
+        active_idx = script.find("return 'active'")
+        if preview_idx == -1 or (active_idx != -1 and preview_idx > active_idx):
+            return "active"
+        return "preview"
 
 
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
@@ -653,6 +670,40 @@ def test_google_meet_check_joined_accepts_waiting_room_text_state() -> None:
     result = asyncio.run(controller._check_joined(page, timeout=0.01))
 
     assert result is True
+
+
+def test_google_meet_classify_meeting_state_checks_preview_before_active_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _ClassifierScriptPage()
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "preview"
+
+
+def test_google_meet_check_joined_rejects_preview_state_even_with_mic_camera_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <main>
+              <div>What's your name?</div>
+              <button>Ask to join</button>
+            </main>
+          </body>
+        </html>
+        """,
+        visible_button_labels=("Turn off microphone", "Turn off camera"),
+        preview_visible=True,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=0.01))
+
+    assert result is False
 
 
 def test_google_meet_check_joined_accepts_live_meet_url_after_preview_controls_disappear() -> None:
