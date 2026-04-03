@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Self
@@ -12,8 +11,6 @@ from playwright.async_api import BrowserContext, Page, Playwright, async_playwri
 from joinly.utils.logging import LOGGING_TRACE
 
 logger = logging.getLogger(__name__)
-
-_CDP_RE = re.compile(r"DevTools listening on (ws://.*)")
 
 
 class BrowserSession:
@@ -47,7 +44,6 @@ class BrowserSession:
         )
         self._net_log_path = Path(net_log_path).expanduser() if net_log_path else None
 
-        self._proc: asyncio.subprocess.Process | None = None
         self._profile_dir: tempfile.TemporaryDirectory | None = None
         self._profile_path: Path | None = None
         self._playwright: Playwright | None = None
@@ -89,9 +85,6 @@ class BrowserSession:
         profile_dir = self._get_profile_dir()
         logger.debug("Profile directory ready at: %s", profile_dir)
         chromium_args = [
-            str(bin_path),
-            f"--remote-debugging-port={self._cdp_port}",
-            f"--user-data-dir={profile_dir}",
             "--use-fake-ui-for-media-stream",
             "--alsa-output-device=pulse",
             f"--alsa-input-device={self._env.get('PULSE_SOURCE')}",
@@ -126,37 +119,18 @@ class BrowserSession:
             )
             logger.debug("Chromium net log path: %s", self._net_log_path)
 
-        logger.debug("Launching Chromium browser.")
-        self._proc = await asyncio.create_subprocess_exec(
-            *chromium_args,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        logger.debug("Launching Chromium browser context.")
+        self._pw_context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            executable_path=str(bin_path),
+            headless=False,
+            chromium_sandbox=False,
+            ignore_default_args=["--mute-audio"],
+            args=chromium_args,
             env=self._env,
-            start_new_session=True,
         )
-        logger.debug("Chromium browser launched.")
-
-        while line := await self._proc.stderr.readline():  # type: ignore[attr-defined]
-            logger.log(LOGGING_TRACE, "[chromium] %s", line.decode().strip())
-            m = _CDP_RE.search(line.decode())
-            if m:
-                cdp_endpoint = m.group(1)
-                break
-        else:
-            self._proc.terminate()
-            msg = "Could not find DevTools URL in stderr"
-            logger.error(msg)
-            raise RuntimeError(msg)
-        logger.debug("DevTools URL: %s", cdp_endpoint)
-        self.cdp_url = cdp_endpoint
-
-        self._pw_browser = await self._playwright.chromium.connect_over_cdp(
-            cdp_endpoint
-        )
-        self._pw_context = self._pw_browser.contexts[0]
-        self._default_page = (
-            self._pw_context.pages[0] if self._pw_context.pages else None
-        )
+        self._pw_browser = self._pw_context.browser
+        self._default_page = self._pw_context.pages[0] if self._pw_context.pages else None
 
         logger.debug("Playwright started.")
 
@@ -166,21 +140,10 @@ class BrowserSession:
         """Stop the browser."""
         logger.debug("Stopping browser.")
 
-        for page in self._pages:
-            if page is not self._default_page and not page.is_closed():
-                await page.close()
+        if self._pw_context is not None:
+            await self._pw_context.close()
         if self._playwright:
             await self._playwright.stop()
-
-        if self._proc and self._proc.returncode is None:
-            logger.debug("Terminating browser process.")
-            self._proc.terminate()
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=1)
-            except TimeoutError:
-                logger.warning("Browser process did not terminate, killing it.")
-                self._proc.kill()
-                await self._proc.wait()
         logger.debug("Browser stopped.")
 
         if self._profile_dir is not None:
@@ -190,7 +153,6 @@ class BrowserSession:
         self._pw_context = None
         self._pw_browser = None
         self._playwright = None
-        self._proc = None
         self._profile_dir = None
         self._profile_path = None
         self._default_page = None
@@ -203,8 +165,16 @@ class BrowserSession:
             msg = "Playwright context is not initialized."
             raise RuntimeError(msg)
 
-        page = await self._pw_context.new_page()
-        logger.debug("New page created in the browser context.")
+        if (
+            self._default_page is not None
+            and not self._default_page.is_closed()
+            and self._default_page not in self._pages
+        ):
+            page = self._default_page
+            logger.debug("Reusing default page in the browser context.")
+        else:
+            page = await self._pw_context.new_page()
+            logger.debug("New page created in the browser context.")
 
         page.on(
             "console",
@@ -212,6 +182,7 @@ class BrowserSession:
                 LOGGING_TRACE, "[console][%s] %s", msg.type, msg.text
             ),
         )
-        self._pages.append(page)
+        if page not in self._pages:
+            self._pages.append(page)
 
         return page

@@ -2,8 +2,8 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from types import ModuleType
+from types import SimpleNamespace
 
 sys.modules.setdefault(
     "PIL",
@@ -49,37 +49,48 @@ class _FakeStderr:
         return b""
 
 
-class _FakeProc:
+class _FakePage:
     def __init__(self) -> None:
-        self.stderr = _FakeStderr(
-            b"DevTools listening on ws://127.0.0.1/devtools/browser/test\n"
-        )
-        self.returncode: int | None = None
-        self.terminated = False
-        self.killed = False
-        self.wait_calls = 0
+        self.closed = False
+        self.listeners: list[tuple[str, object]] = []
 
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = 0
+    def is_closed(self) -> bool:
+        return self.closed
 
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
+    async def close(self) -> None:
+        self.closed = True
 
-    async def wait(self) -> int:
-        self.wait_calls += 1
-        return self.returncode or 0
+    def on(self, event: str, listener: object) -> None:
+        self.listeners.append((event, listener))
+
+
+class _FakeBrowserContext:
+    def __init__(self, pages: list[_FakePage] | None = None) -> None:
+        self.pages = list(pages or [])
+        self.close_calls = 0
+
+    @property
+    def browser(self) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    async def new_page(self) -> _FakePage:
+        page = _FakePage()
+        self.pages.append(page)
+        return page
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class _FakeChromium:
     def __init__(self, executable_path: str) -> None:
         self.executable_path = executable_path
-        self.connected_to: list[str] = []
+        self.launch_calls: list[dict[str, object]] = []
+        self.context = _FakeBrowserContext()
 
-    async def connect_over_cdp(self, cdp_endpoint: str) -> SimpleNamespace:
-        self.connected_to.append(cdp_endpoint)
-        return SimpleNamespace(contexts=[SimpleNamespace(pages=[])])
+    async def launch_persistent_context(self, **kwargs: object) -> _FakeBrowserContext:
+        self.launch_calls.append(kwargs)
+        return self.context
 
 
 class _FakePlaywright:
@@ -103,25 +114,12 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
     monkeypatch, tmp_path: Path
 ) -> None:
     launched: dict[str, object] = {}
-    fake_proc = _FakeProc()
     fake_playwright = _FakePlaywright("/playwright/chromium")
-
-    async def fake_create_subprocess_exec(
-        *args: object, **kwargs: object
-    ) -> _FakeProc:
-        launched["args"] = args
-        launched["kwargs"] = kwargs
-        return fake_proc
 
     monkeypatch.setattr(
         browser_session_module,
         "async_playwright",
         lambda: _FakePlaywrightStarter(fake_playwright),
-    )
-    monkeypatch.setattr(
-        browser_session_module.asyncio,
-        "create_subprocess_exec",
-        fake_create_subprocess_exec,
     )
 
     executable_path = tmp_path / "chromium"
@@ -137,10 +135,15 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
     async def scenario() -> None:
         await session.__aenter__()
         try:
-            assert launched["args"][0] == str(executable_path)
-            assert f"--user-data-dir={profile_dir}" in launched["args"]
-            assert f"--log-net-log={net_log_path}" in launched["args"]
-            assert "--net-log-capture-mode=Everything" in launched["args"]
+            launch_kwargs = fake_playwright.chromium.launch_calls[0]
+            launched["kwargs"] = launch_kwargs
+            assert launch_kwargs["executable_path"] == str(executable_path)
+            assert launch_kwargs["user_data_dir"] == str(profile_dir)
+            assert launch_kwargs["headless"] is False
+            assert launch_kwargs["chromium_sandbox"] is False
+            assert launch_kwargs["ignore_default_args"] == ["--mute-audio"]
+            assert f"--log-net-log={net_log_path}" in launch_kwargs["args"]
+            assert "--net-log-capture-mode=Everything" in launch_kwargs["args"]
             assert profile_dir.exists()
         finally:
             await session.__aexit__()
@@ -149,32 +152,18 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
 
     assert profile_dir.exists()
     assert fake_playwright.stop_calls == 1
-    assert fake_proc.terminated is True
+    assert fake_playwright.chromium.context.close_calls == 1
 
 
 def test_browser_session_creates_and_cleans_up_temporary_profile(
     monkeypatch, tmp_path: Path
 ) -> None:
-    launched: dict[str, object] = {}
-    fake_proc = _FakeProc()
     fake_playwright = _FakePlaywright("/playwright/chromium")
-
-    async def fake_create_subprocess_exec(
-        *args: object, **kwargs: object
-    ) -> _FakeProc:
-        launched["args"] = args
-        launched["kwargs"] = kwargs
-        return fake_proc
 
     monkeypatch.setattr(
         browser_session_module,
         "async_playwright",
         lambda: _FakePlaywrightStarter(fake_playwright),
-    )
-    monkeypatch.setattr(
-        browser_session_module.asyncio,
-        "create_subprocess_exec",
-        fake_create_subprocess_exec,
     )
 
     playwright_browser = tmp_path / "playwright-chromium"
@@ -188,13 +177,9 @@ def test_browser_session_creates_and_cleans_up_temporary_profile(
         nonlocal captured_profile_dir
         await session.__aenter__()
         try:
-            assert launched["args"][0] == str(playwright_browser)
-            profile_arg = next(
-                arg
-                for arg in launched["args"]
-                if isinstance(arg, str) and arg.startswith("--user-data-dir=")
-            )
-            captured_profile_dir = Path(profile_arg.removeprefix("--user-data-dir="))
+            launch_kwargs = fake_playwright.chromium.launch_calls[0]
+            assert launch_kwargs["executable_path"] == str(playwright_browser)
+            captured_profile_dir = Path(launch_kwargs["user_data_dir"])
             assert captured_profile_dir.exists()
         finally:
             await session.__aexit__()
@@ -203,3 +188,33 @@ def test_browser_session_creates_and_cleans_up_temporary_profile(
 
     assert captured_profile_dir is not None
     assert not captured_profile_dir.exists()
+
+
+def test_browser_session_reuses_default_page_before_creating_new_pages(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fake_playwright = _FakePlaywright("/playwright/chromium")
+    default_page = _FakePage()
+    fake_playwright.chromium.context = _FakeBrowserContext([default_page])
+
+    monkeypatch.setattr(
+        browser_session_module,
+        "async_playwright",
+        lambda: _FakePlaywrightStarter(fake_playwright),
+    )
+
+    executable_path = tmp_path / "chromium"
+    executable_path.write_text("")
+    session = BrowserSession(executable_path=str(executable_path))
+
+    async def scenario() -> None:
+        await session.__aenter__()
+        try:
+            first_page = await session.get_page()
+            second_page = await session.get_page()
+            assert first_page is default_page
+            assert second_page is not default_page
+        finally:
+            await session.__aexit__()
+
+    asyncio.run(scenario())
