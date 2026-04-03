@@ -306,6 +306,8 @@ class _JoinStatePage:
         "waiting for the host", "waiting for others",
         "waiting for organizer", "meeting hasn't started",
         "meeting has not started",
+        "still trying to get in",
+        "please wait until a meeting host brings you into the call",
     )
     # Text fragments that map to the "failed" meeting state.
     _FAILURE_SUBSTRINGS = (
@@ -1265,6 +1267,28 @@ def test_google_meet_classify_state_returns_waiting() -> None:
     page = _JoinStatePage(
         url="https://meet.google.com/abc-defg-hij",
         html="<html><body>No one else is here yet</body></html>",
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "waiting"
+
+
+def test_google_meet_classify_state_returns_waiting_for_still_trying_to_get_in() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            Still trying to get in...
+            Please wait until a meeting host brings you into the call
+          </body>
+        </html>
+        """,
+        visible_button_labels=("Leave call",),
         preview_visible=False,
     )
 

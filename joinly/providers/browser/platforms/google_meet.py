@@ -44,6 +44,11 @@ _WAITING_ROOM_TEXT_PATTERNS = (
     re.compile(r"you're the first one here", re.IGNORECASE),
     re.compile(r"waiting for (?:the )?(?:host|others?|organizer)", re.IGNORECASE),
     re.compile(r"meeting (?:hasn't|has not) started", re.IGNORECASE),
+    re.compile(r"still trying to get in", re.IGNORECASE),
+    re.compile(
+        r"please wait until a meeting host brings you into the call",
+        re.IGNORECASE,
+    ),
 )
 _TERMINAL_FAILURE_TEXT_PATTERNS = (
     re.compile(r"you can't join this (?:video call|meeting)", re.IGNORECASE),
@@ -557,6 +562,8 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         'waiting for organizer',
         "meeting hasn't started",
         'meeting has not started',
+        'still trying to get in',
+        'please wait until a meeting host brings you into the call',
     ];
     for (const w of waiting) {
         if (lower.includes(w)) return 'waiting';
