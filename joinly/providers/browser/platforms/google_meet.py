@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar
+from urllib.parse import urlparse
 
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -25,6 +26,36 @@ _NAVIGATION_STEP_DEADLINE_SECONDS = 25.0
 _DIAGNOSTIC_STEP_DEADLINE_SECONDS = 1.0
 _PREFLIGHT_NAVIGATION_TIMEOUT_MS = 10000
 _PREFLIGHT_STEP_DEADLINE_SECONDS = 12.0
+_POST_CLICK_JOIN_TIMEOUT_SECONDS = 20.0
+_POST_CLICK_POLL_INTERVAL_MS = 250
+
+_WAITING_ROOM_TEXT_PATTERNS = (
+    re.compile(r"asking to be let in", re.IGNORECASE),
+    re.compile(r"someone lets you in", re.IGNORECASE),
+    re.compile(r"no one else is here yet", re.IGNORECASE),
+    re.compile(r"you're the first one here", re.IGNORECASE),
+    re.compile(r"waiting for (?:the )?(?:host|others?|organizer)", re.IGNORECASE),
+    re.compile(r"meeting (?:hasn't|has not) started", re.IGNORECASE),
+)
+_TERMINAL_FAILURE_TEXT_PATTERNS = (
+    re.compile(r"you can't join this (?:video call|meeting)", re.IGNORECASE),
+    re.compile(r"meeting code is invalid", re.IGNORECASE),
+    re.compile(r"couldn't find the meeting", re.IGNORECASE),
+    re.compile(r"(?:this )?meeting has ended", re.IGNORECASE),
+    re.compile(r"call has ended", re.IGNORECASE),
+)
+_ACTIVE_MEETING_CONTROL_PATTERNS = (
+    re.compile(r"leave", re.IGNORECASE),
+    re.compile(r"exit call", re.IGNORECASE),
+    re.compile(r"hang up", re.IGNORECASE),
+    re.compile(r"end call", re.IGNORECASE),
+    re.compile(r"turn (?:off|on) mic", re.IGNORECASE),
+    re.compile(r"turn (?:off|on) camera", re.IGNORECASE),
+)
+_PREVIEW_JOIN_CONTROL_PATTERN = re.compile(
+    r"(?:ask to join|request to join|join now|join meeting|join)",
+    re.IGNORECASE,
+)
 
 _T = TypeVar("_T")
 
@@ -318,7 +349,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         await stop_btn.click(timeout=2000)
         await page.wait_for_timeout(500)
 
-    async def _check_joined(self, page: Page, timeout: float = 10) -> bool:  # noqa: ASYNC109
+    async def _check_joined(
+        self,
+        page: Page,
+        timeout: float = _POST_CLICK_JOIN_TIMEOUT_SECONDS,
+    ) -> bool:  # noqa: ASYNC109
         """Check if the Google Meet meeting has been joined successfully.
 
         Args:
@@ -328,34 +363,96 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         Returns:
             bool: True if joined, False otherwise.
         """
-        locators = [
-            page.locator("div >> text=/asking to be let in/i"),
-            page.locator('[aria-label^="someone lets you in" i]'),
-            page.get_by_role("button", name=re.compile(r"leave", re.IGNORECASE)),
-        ]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await self._dismiss_dialog(page, timeout=0)
 
-        tasks = [
-            asyncio.create_task(loc.wait_for(state="visible", timeout=0))
-            for loc in locators
-        ]
-        dismiss_task = asyncio.create_task(self._dismiss_dialog(page, timeout=0))
+            if await self._has_active_meeting_controls(page):
+                return True
 
-        try:
-            done, _ = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
+            page_text = await self._read_page_text(page)
+            if self._matches_any_pattern(page_text, _TERMINAL_FAILURE_TEXT_PATTERNS):
+                return False
+
+            if self._matches_any_pattern(page_text, _WAITING_ROOM_TEXT_PATTERNS):
+                return True
+
+            current_url = getattr(page, "url", "")
+            if self._looks_like_live_meeting_url(current_url) and not await self._preview_join_controls_visible(page):
+                return True
+
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
+            await page.wait_for_timeout(
+                min(_POST_CLICK_POLL_INTERVAL_MS, int(remaining_seconds * 1000))
             )
-            return any(not task.exception() for task in done)
-        finally:
-            dismiss_task.cancel()
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+
+        return False
 
     async def _dismiss_dialog(self, page: Page, timeout: int = 100) -> None:  # noqa: ASYNC109
         """Dismiss any popups that may appear."""
         action_btn = page.locator("div[role='dialog'] [data-mdc-dialog-action]")
         with contextlib.suppress(Exception):
             await action_btn.first.click(timeout=timeout)
+
+    async def _has_active_meeting_controls(self, page: Page) -> bool:
+        """Return True when in-call controls are already visible."""
+        for pattern in _ACTIVE_MEETING_CONTROL_PATTERNS:
+            locator = page.get_by_role("button", name=pattern)
+            if await self._locator_is_visible(locator):
+                return True
+        return False
+
+    async def _preview_join_controls_visible(self, page: Page) -> bool:
+        """Return True when preview-only join controls are still visible."""
+        if await self._locator_is_visible(
+            page.get_by_placeholder(re.compile("name", re.IGNORECASE))
+        ):
+            return True
+        return await self._locator_is_visible(
+            page.get_by_role("button", name=_PREVIEW_JOIN_CONTROL_PATTERN)
+        )
+
+    async def _locator_is_visible(self, locator: Any) -> bool:
+        """Safely check whether a locator is visible."""
+        with contextlib.suppress(Exception):
+            return await locator.is_visible()
+        return False
+
+    async def _read_page_text(self, page: Page) -> str:
+        """Return normalized text content for state classification."""
+        html_content = await self._read_page_diagnostic(
+            lambda: page.content(),
+            fallback="",
+        )
+        return self._strip_html(html_content)
+
+    @staticmethod
+    def _matches_any_pattern(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+        """Return True when any pattern matches the normalized text."""
+        return any(pattern.search(text) for pattern in patterns)
+
+    @classmethod
+    def _looks_like_live_meeting_url(cls, current_url: str) -> bool:
+        """Return True when the page is on a concrete Meet room URL."""
+        if not current_url or not cls.url_pattern.match(current_url):
+            return False
+
+        parsed = urlparse(current_url)
+        path = parsed.path.strip("/")
+        return bool(path) and path.lower() not in {"landing"}
+
+    @staticmethod
+    def _strip_html(content: str) -> str:
+        """Return normalized visible text from HTML content."""
+        without_non_text = re.sub(
+            r"(?is)<(script|style).*?>.*?</\1>",
+            " ",
+            content,
+        )
+        without_tags = re.sub(r"(?s)<[^>]+>", " ", without_non_text)
+        return re.sub(r"\s+", " ", without_tags).strip()
 
     async def _log_navigation_timeout(self, page: Page, *, target_url: str) -> None:
         """Log browser state when Google Meet navigation stalls."""

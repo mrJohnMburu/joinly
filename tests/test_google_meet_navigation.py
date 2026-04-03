@@ -179,6 +179,71 @@ class _SlowDiagnosticsPage(_SlowGotoPage):
         return b"png"
 
 
+class _VisibilityLocator:
+    def __init__(self, visible: bool) -> None:
+        self._visible = visible
+
+    @property
+    def first(self) -> "_VisibilityLocator":
+        return self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert state == "visible"
+        if not self._visible:
+            raise _StubPlaywrightTimeoutError("not visible")
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+    async def click(self, timeout: int | None = None) -> None:  # noqa: ARG002
+        return None
+
+
+class _JoinStatePage:
+    def __init__(
+        self,
+        *,
+        url: str,
+        html: str,
+        visible_button_labels: tuple[str, ...] = (),
+        preview_visible: bool = False,
+    ) -> None:
+        self.url = url
+        self._html = html
+        self._visible_button_labels = visible_button_labels
+        self._preview_visible = preview_visible
+
+    async def content(self) -> str:
+        return self._html
+
+    async def wait_for_timeout(self, timeout: int) -> None:  # noqa: ARG002
+        await asyncio.sleep(0)
+
+    def get_by_role(self, role: str, *, name: object) -> _VisibilityLocator:
+        if role != "button":
+            return _VisibilityLocator(False)
+
+        if hasattr(name, "search"):
+            visible = any(name.search(label) for label in self._visible_button_labels)
+        else:
+            visible = False
+        return _VisibilityLocator(visible)
+
+    def get_by_placeholder(self, _pattern: object) -> _VisibilityLocator:
+        return _VisibilityLocator(self._preview_visible)
+
+    def locator(self, selector: str) -> _VisibilityLocator:
+        lowered_html = self._html.lower()
+        lowered_selector = selector.lower()
+        if "asking to be let in" in lowered_selector:
+            return _VisibilityLocator("asking to be let in" in lowered_html)
+        if 'aria-label^="someone lets you in"' in lowered_selector:
+            return _VisibilityLocator("someone lets you in" in lowered_html)
+        if 'div[role="dialog"] [data-mdc-dialog-action]' in lowered_selector:
+            return _VisibilityLocator(False)
+        return _VisibilityLocator(False)
+
+
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         module_name,
@@ -419,3 +484,60 @@ def test_google_meet_join_logs_state_when_post_click_join_check_fails(
     assert page.screenshot_calls
     assert "Google Meet join did not reach active or waiting state" in caplog.text
     assert "No one else is here yet" in caplog.text
+
+
+def test_google_meet_check_joined_accepts_waiting_room_text_state() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <main>
+              <div>No one else is here yet</div>
+            </main>
+          </body>
+        </html>
+        """,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=0.01))
+
+    assert result is True
+
+
+def test_google_meet_check_joined_accepts_live_meet_url_after_preview_controls_disappear() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body><main>Meet</main></body></html>",
+        visible_button_labels=("More options",),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=0.01))
+
+    assert result is True
+
+
+def test_google_meet_check_joined_rejects_terminal_failure_text_state() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <main>
+              <div>You can't join this video call</div>
+            </main>
+          </body>
+        </html>
+        """,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=0.01))
+
+    assert result is False
