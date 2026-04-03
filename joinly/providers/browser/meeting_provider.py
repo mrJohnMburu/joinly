@@ -138,6 +138,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             executable_path=browser_executable_path,
             profile_dir=browser_profile_dir,
             net_log_path=browser_net_log_path,
+            window_size=display_size,
         )
         self._services = [
             self._pulse_server,

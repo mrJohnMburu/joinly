@@ -130,6 +130,7 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
         executable_path=str(executable_path),
         profile_dir=str(profile_dir),
         net_log_path=str(net_log_path),
+        window_size=(1024, 576),
     )
 
     async def scenario() -> None:
@@ -142,6 +143,7 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
             assert launch_kwargs["headless"] is False
             assert launch_kwargs["chromium_sandbox"] is False
             assert launch_kwargs["ignore_default_args"] == ["--mute-audio"]
+            assert "--window-size=1024,576" in launch_kwargs["args"]
             assert f"--log-net-log={net_log_path}" in launch_kwargs["args"]
             assert "--net-log-capture-mode=Everything" in launch_kwargs["args"]
             assert profile_dir.exists()

@@ -24,6 +24,7 @@ class BrowserSession:
         executable_path: str | Path | None = None,
         profile_dir: str | Path | None = None,
         net_log_path: str | Path | None = None,
+        window_size: tuple[int, int] = (1280, 720),
     ) -> None:
         """Initialize the browser params.
 
@@ -35,6 +36,7 @@ class BrowserSession:
             profile_dir: Optional browser profile directory. When provided, it is
                 reused across runs instead of creating a temporary profile.
             net_log_path: Optional Chromium net log output path.
+            window_size: Browser window size passed to Chromium.
         """
         self._env: dict[str, str] = env if env is not None else os.environ.copy()
         self._cdp_port: int = cdp_port
@@ -43,6 +45,7 @@ class BrowserSession:
             Path(profile_dir).expanduser() if profile_dir else None
         )
         self._net_log_path = Path(net_log_path).expanduser() if net_log_path else None
+        self._window_size = window_size
 
         self._profile_dir: tempfile.TemporaryDirectory | None = None
         self._profile_path: Path | None = None
@@ -96,7 +99,7 @@ class BrowserSession:
             "--ozone-platform=x11",
             "--disable-gpu",
             "--disable-focus-on-load",
-            "--window-size=1280,720",
+            f"--window-size={self._window_size[0]},{self._window_size[1]}",
             "--lang=en-US",
             "--test-type",
             "--no-sandbox",  # required for docker
