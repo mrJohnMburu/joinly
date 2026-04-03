@@ -147,27 +147,33 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             step="post_navigation.access_denied",
         )
 
-        name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
-        logger.debug("Google Meet join: waiting for guest name field")
-        try:
-            await name_field.fill(name, timeout=60000)
-        except PlaywrightTimeoutError:
-            await self._raise_if_access_denied(
-                page,
-                target_url=url,
-                step="name_field.access_denied",
-            )
-            await self._log_join_step_timeout(
-                page,
-                target_url=url,
-                step="name_field.fill",
-            )
-            raise
-        logger.debug("Google Meet join: guest name entered")
-
         join_btn = page.get_by_role(
             "button", name=re.compile(r"^(?!.*other ways).*join.*$", re.IGNORECASE)
         )
+        name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
+        if await self._locator_is_visible(name_field):
+            logger.debug("Google Meet join: waiting for guest name field")
+            try:
+                await name_field.fill(name, timeout=60000)
+            except PlaywrightTimeoutError:
+                await self._raise_if_access_denied(
+                    page,
+                    target_url=url,
+                    step="name_field.access_denied",
+                )
+                await self._log_join_step_timeout(
+                    page,
+                    target_url=url,
+                    step="name_field.fill",
+                )
+                raise
+            logger.debug("Google Meet join: guest name entered")
+        else:
+            logger.debug(
+                "Google Meet join: guest name field not present; "
+                "continuing with signed-in preview"
+            )
+
         await self._capture_debug_snapshot(page, stage="pre_click")
         logger.debug("Google Meet join: clicking join button")
         try:

@@ -15,15 +15,19 @@ class _StubPlaywrightTimeoutError(Exception):
 
 
 class _StubLocator:
-    def __init__(self) -> None:
+    def __init__(self, *, visible: bool = True) -> None:
         self.fill_calls: list[tuple[str, int | None]] = []
         self.click_calls: list[dict[str, object]] = []
+        self.visible = visible
 
     async def fill(self, value: str, timeout: int | None = None) -> None:
         self.fill_calls.append((value, timeout))
 
     async def click(self, timeout: int | None = None, **kwargs: object) -> None:
         self.click_calls.append({"timeout": timeout, **kwargs})
+
+    async def is_visible(self) -> bool:
+        return self.visible
 
 
 class _TimeoutFillLocator(_StubLocator):
@@ -620,6 +624,39 @@ def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkey
         ("https://meet.google.com/test-call", "commit", 20000)
     ]
     assert page.name_field.fill_calls == [("OpenClaw", 60000)]
+    assert page.join_button.click_calls == [{"timeout": 5000}]
+
+
+def test_google_meet_join_skips_guest_name_when_signed_in_preview_has_no_name_field(
+    monkeypatch,
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _StubPage()
+    page.name_field = _StubLocator(visible=False)
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.name_field.fill_calls == []
     assert page.join_button.click_calls == [{"timeout": 5000}]
 
 
