@@ -57,8 +57,6 @@ _ACTIVE_MEETING_CONTROL_PATTERNS = (
     re.compile(r"exit call", re.IGNORECASE),
     re.compile(r"hang up", re.IGNORECASE),
     re.compile(r"end call", re.IGNORECASE),
-    re.compile(r"turn (?:off|on) mic(?:rophone)?", re.IGNORECASE),
-    re.compile(r"turn (?:off|on) camera", re.IGNORECASE),
 )
 _PREVIEW_JOIN_CONTROL_PATTERN = re.compile(
     r"(?:ask to join|request to join|join now|join meeting|join)",
@@ -596,8 +594,6 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     // --- Active meeting controls (in-call UI visible) ---
     const activeLabels = [
         /leave/i, /exit call/i, /hang up/i, /end call/i,
-        /turn off mic(?:rophone)?/i, /turn on mic(?:rophone)?/i,
-        /turn off camera/i, /turn on camera/i,
     ];
     for (const btn of document.querySelectorAll('button[aria-label]')) {
         const label = btn.getAttribute('aria-label') || '';

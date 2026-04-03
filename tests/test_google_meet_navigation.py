@@ -298,9 +298,6 @@ class _JoinStatePage:
     # Active button aria-labels that map to the "active" meeting state.
     _ACTIVE_CONTROL_SUBSTRINGS = (
         "leave", "exit call", "hang up", "end call",
-        "turn off mic", "turn on mic",
-        "turn off microphone", "turn on microphone",
-        "turn off camera", "turn on camera",
     )
     # Text fragments that map to the "waiting" meeting state.
     _WAITING_SUBSTRINGS = (
@@ -1049,6 +1046,25 @@ def test_google_meet_classify_meeting_state_checks_preview_before_active_control
     assert result == "preview"
 
 
+def test_google_meet_classify_meeting_state_active_js_ignores_preview_device_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _ClassifierScriptPage()
+
+    asyncio.run(controller._classify_meeting_state(page))
+
+    assert page.last_expression is not None
+    script = str(page.last_expression).lower()
+    active_start = script.index("const activelabels")
+    shell_start = script.index("// --- joined shell")
+    active_section = script[active_start:shell_start]
+
+    assert "turn off mic" not in active_section
+    assert "turn on mic" not in active_section
+    assert "turn off camera" not in active_section
+    assert "turn on camera" not in active_section
+
+
 def test_google_meet_check_joined_rejects_preview_state_even_with_mic_camera_controls() -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
@@ -1228,6 +1244,21 @@ def test_google_meet_classify_state_returns_active() -> None:
     assert result == "active"
 
 
+def test_google_meet_classify_state_rejects_preview_device_controls_without_leave_button() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body><main>Connecting...</main></body></html>",
+        visible_button_labels=("Turn off microphone", "Turn off camera"),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "transitioning"
+
+
 def test_google_meet_classify_state_returns_waiting() -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
@@ -1339,6 +1370,27 @@ def test_google_meet_check_joined_wakes_shell_active_ui_to_validate_controls() -
 
     assert result is True
     assert page.mouse.move_calls
+
+
+def test_google_meet_check_joined_rejects_shell_with_only_preview_device_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <div data-in-call="true"></div>
+          </body>
+        </html>
+        """,
+        visible_button_labels=("Turn off microphone", "Turn off camera"),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=1.0))
+
+    assert result is False
 
 
 def test_google_meet_get_participants_wakes_ui_and_accepts_show_everyone_button() -> None:
