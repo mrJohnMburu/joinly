@@ -234,6 +234,20 @@ class _SlowVisibilityLocator(_VisibilityLocator):
         return await super().is_visible()
 
 
+class _DialogStallLocator(_VisibilityLocator):
+    def __init__(self, *, stall_seconds: float) -> None:
+        super().__init__(True)
+        self._stall_seconds = stall_seconds
+        self.click_calls: list[int | None] = []
+
+    async def click(self, timeout: int | None = None) -> None:
+        self.click_calls.append(timeout)
+        if timeout == 0:
+            await asyncio.sleep(self._stall_seconds)
+            return None
+        raise _StubPlaywrightTimeoutError("dialog click timed out quickly")
+
+
 class _JoinStatePage:
     # Active button aria-labels that map to the "active" meeting state.
     _ACTIVE_CONTROL_SUBSTRINGS = (
@@ -350,6 +364,24 @@ class _SlowJoinStatePage(_JoinStatePage):
         """Slow variant: simulate an expensive evaluate() call on Pi."""
         await asyncio.sleep(self._delay_seconds)
         return await super().evaluate(expression)
+
+
+class _DialogStallJoinStatePage(_JoinStatePage):
+    def __init__(
+        self,
+        *,
+        url: str,
+        html: str,
+        stall_seconds: float,
+    ) -> None:
+        super().__init__(url=url, html=html)
+        self.dialog_locator = _DialogStallLocator(stall_seconds=stall_seconds)
+
+    def locator(self, selector: str) -> _VisibilityLocator:
+        lowered_selector = selector.lower()
+        if "div[role='dialog'] [data-mdc-dialog-action]" == lowered_selector:
+            return self.dialog_locator
+        return super().locator(selector)
 
 
 class _ClassifierScriptPage:
@@ -813,6 +845,33 @@ def test_google_meet_check_joined_bounds_slow_visibility_probes(monkeypatch) -> 
 
     assert result is True
     assert elapsed < 1.0
+
+
+def test_google_meet_check_joined_does_not_block_on_dialog_dismissal() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _DialogStallJoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <main>
+              <div>No one else is here yet</div>
+            </main>
+          </body>
+        </html>
+        """,
+        stall_seconds=0.05,
+    )
+
+    started_at = time.monotonic()
+    result = asyncio.run(controller._check_joined(page, timeout=0.2))
+    elapsed = time.monotonic() - started_at
+
+    assert result is True
+    assert elapsed < 0.05
+    assert page.dialog_locator.click_calls
+    assert all(timeout != 0 for timeout in page.dialog_locator.click_calls)
 
 
 # ---------------------------------------------------------------------------

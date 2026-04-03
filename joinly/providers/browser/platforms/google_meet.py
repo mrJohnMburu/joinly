@@ -387,7 +387,9 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             iteration += 1
             iter_start = time.monotonic()
 
-            await self._dismiss_dialog(page, timeout=0)
+            # Playwright treats timeout=0 as "no timeout", which can hang the
+            # join probe behind a non-actionable overlay. Keep this bounded.
+            await self._dismiss_dialog(page)
 
             state = await self._classify_meeting_state(page)
 
