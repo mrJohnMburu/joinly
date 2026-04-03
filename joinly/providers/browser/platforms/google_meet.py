@@ -108,6 +108,12 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             raise
 
         if not await self._check_joined(page):
+            await self._log_join_step_timeout(
+                page,
+                target_url=url,
+                step="post_click.join_state",
+                message="Google Meet join did not reach active or waiting state",
+            )
             msg = "Join check failed: Failed to join the Google Meet meeting."
             raise RuntimeError(msg)
 

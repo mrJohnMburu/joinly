@@ -98,6 +98,29 @@ class _FillTimeoutPage(_StubPage):
         return b"png"
 
 
+class _JoinCheckFailurePage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = "https://meet.google.com/landing"
+        self.screenshot_calls: list[dict[str, object]] = []
+
+    async def title(self) -> str:
+        return "Google Meet"
+
+    async def content(self) -> str:
+        return """
+        <html>
+          <body>
+            No one else is here yet
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        return b"png"
+
+
 class _SlowGotoPage(_StubPage):
     def __init__(self, *, delay_seconds: float) -> None:
         super().__init__()
@@ -369,3 +392,30 @@ def test_google_meet_join_bounds_timeout_diagnostics(monkeypatch, caplog) -> Non
 
     assert elapsed < 0.15
     assert "Google Meet navigation timed out" in caplog.text
+
+
+def test_google_meet_join_logs_state_when_post_click_join_check_fails(
+    monkeypatch, caplog
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinCheckFailurePage()
+
+    async def _check_joined(_page: object) -> bool:
+        return False
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="Join check failed"):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+
+    assert page.screenshot_calls
+    assert "Google Meet join did not reach active or waiting state" in caplog.text
+    assert "No one else is here yet" in caplog.text
