@@ -44,7 +44,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             name: The name of the participant.
             passcode: The passcode for the meeting (if required).
         """
-        await page.goto(url, wait_until="load", timeout=20000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
         await name_field.fill(name, timeout=20000)
