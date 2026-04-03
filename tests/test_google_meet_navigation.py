@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -252,7 +253,9 @@ class _JoinStatePage:
     # Active button aria-labels that map to the "active" meeting state.
     _ACTIVE_CONTROL_SUBSTRINGS = (
         "leave", "exit call", "hang up", "end call",
-        "turn off mic", "turn on mic", "turn off camera", "turn on camera",
+        "turn off mic", "turn on mic",
+        "turn off microphone", "turn on microphone",
+        "turn off camera", "turn on camera",
     )
     # Text fragments that map to the "waiting" meeting state.
     _WAITING_SUBSTRINGS = (
@@ -331,10 +334,122 @@ class _JoinStatePage:
             if any(a in label.lower() for a in self._ACTIVE_CONTROL_SUBSTRINGS):
                 return "active"
 
+        if 'data-in-call="true"' in lower:
+            return "shell_active"
+
         if not self._preview_visible:
             return "transitioning"
 
         return "unknown"
+
+
+class _StubMouse:
+    def __init__(self, on_move: Callable[[], None] | None = None) -> None:
+        self.move_calls: list[tuple[int, int]] = []
+        self._on_move = on_move
+
+    async def move(self, x: int, y: int) -> None:
+        self.move_calls.append((x, y))
+        if self._on_move is not None:
+            self._on_move()
+
+
+class _WakeableShellJoinStatePage(_JoinStatePage):
+    def __init__(self) -> None:
+        super().__init__(
+            url="https://meet.google.com/abc-defg-hij",
+            html='<html><body><div data-in-call="true"></div></body></html>',
+            visible_button_labels=(),
+            preview_visible=False,
+        )
+        self._controls_visible = False
+        self.mouse = _StubMouse(self._show_controls)
+        self.viewport_size = {"width": 1280, "height": 720}
+
+    def _show_controls(self) -> None:
+        self._controls_visible = True
+        self._visible_button_labels = (
+            "Turn off microphone",
+            "Leave call",
+            "Show everyone",
+        )
+
+
+class _CountLocator:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    async def count(self) -> int:
+        return self._count
+
+
+class _ParticipantsItemLocator:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    async def get_attribute(self, attr: str) -> str | None:
+        if attr == "aria-label":
+            return self._name
+        return None
+
+    def locator(self, selector: str) -> _CountLocator:
+        return _CountLocator(0)
+
+    def get_by_role(self, role: str, *, name: object) -> _CountLocator:  # noqa: ARG002
+        return _CountLocator(0)
+
+
+class _ParticipantsListLocator(_VisibilityLocator):
+    def __init__(self, page: "_ParticipantsPage") -> None:
+        super().__init__(False)
+        self._page = page
+
+    async def is_visible(self) -> bool:
+        return self._page.participants_open
+
+    def locator(self, selector: str) -> object:
+        if selector == "div[role='listitem']":
+            return self
+        raise AssertionError(f"Unexpected nested selector: {selector}")
+
+    async def all(self) -> list[_ParticipantsItemLocator]:
+        if not self._page.participants_open:
+            return []
+        return [_ParticipantsItemLocator("OpenClaw")]
+
+
+class _ParticipantsButtonLocator(_VisibilityLocator):
+    def __init__(self, page: "_ParticipantsPage", visible: bool) -> None:
+        super().__init__(visible)
+        self._page = page
+
+    async def click(self, timeout: int | None = None) -> None:  # noqa: ARG002
+        self._page.participants_open = True
+
+
+class _ParticipantsPage(_WakeableShellJoinStatePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.participants_open = False
+
+    def locator(self, selector: str) -> object:
+        if selector == 'div[aria-label="Participants"][role="list"]':
+            return _ParticipantsListLocator(self)
+        return super().locator(selector)
+
+    def get_by_role(self, role: str, *, name: object) -> object:
+        if role == "button" and hasattr(name, "search"):
+            labels: tuple[str, ...] = ()
+            if self._controls_visible:
+                labels = self._visible_button_labels
+            visible = any(name.search(label) for label in labels)
+            if any("show everyone" in label.lower() for label in labels):
+                if name.search("Show everyone"):
+                    return _ParticipantsButtonLocator(self, visible=True)
+            if any("leave call" in label.lower() for label in labels):
+                if name.search("Leave call"):
+                    return _VisibilityLocator(True)
+        return super().get_by_role(role, name=name)
 
 
 class _SlowJoinStatePage(_JoinStatePage):
@@ -738,12 +853,12 @@ def test_google_meet_check_joined_rejects_preview_state_even_with_mic_camera_con
     assert result is False
 
 
-def test_google_meet_check_joined_accepts_live_meet_url_after_preview_controls_disappear() -> None:
+def test_google_meet_check_joined_rejects_live_meet_url_without_waiting_or_in_call_controls() -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
     # preview_visible=False and no active labels → evaluate() returns
-    # "transitioning". With _TRANSITIONING_SETTLE_COUNT=3 polls and a generous
-    # timeout the loop must stabilise and return True.
+    # "transitioning". A bare live Meet URL is no longer sufficient to claim a
+    # successful join.
     page = _JoinStatePage(
         url="https://meet.google.com/abc-defg-hij",
         html="<html><body><main>Meet</main></body></html>",
@@ -753,7 +868,7 @@ def test_google_meet_check_joined_accepts_live_meet_url_after_preview_controls_d
 
     result = asyncio.run(controller._check_joined(page, timeout=5.0))
 
-    assert result is True
+    assert result is False
 
 
 def test_google_meet_check_joined_rejects_terminal_failure_text_state() -> None:
@@ -938,7 +1053,7 @@ def test_google_meet_classify_state_returns_transitioning() -> None:
 
 
 def test_google_meet_check_joined_stabilizes_on_transitioning() -> None:
-    """Verify _check_joined returns True after _TRANSITIONING_SETTLE_COUNT polls."""
+    """Verify _check_joined does not accept a bare transitioning shell."""
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
     # preview_visible=False, no active controls → always "transitioning".
@@ -951,7 +1066,54 @@ def test_google_meet_check_joined_stabilizes_on_transitioning() -> None:
 
     result = asyncio.run(controller._check_joined(page, timeout=10.0))
 
+    assert result is False
+
+
+def test_google_meet_classify_state_returns_shell_active() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html='<html><body><div data-in-call="true"></div></body></html>',
+        visible_button_labels=(),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "shell_active"
+
+
+def test_google_meet_check_joined_wakes_shell_active_ui_to_validate_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _WakeableShellJoinStatePage()
+
+    result = asyncio.run(controller._check_joined(page, timeout=1.0))
+
     assert result is True
+    assert page.mouse.move_calls
+
+
+def test_google_meet_get_participants_wakes_ui_and_accepts_show_everyone_button() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _ParticipantsPage()
+
+    participants = asyncio.run(controller.get_participants(page))
+
+    assert [participant.name for participant in participants] == ["OpenClaw"]
+    assert page.mouse.move_calls
+
+
+def test_google_meet_leave_wakes_ui_and_accepts_leave_call_label() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _WakeableShellJoinStatePage()
+
+    asyncio.run(controller.leave(page))
+
+    assert page.mouse.move_calls
 
 
 def test_google_meet_check_joined_logs_iteration_timing(caplog) -> None:
@@ -965,7 +1127,9 @@ def test_google_meet_check_joined_logs_iteration_timing(caplog) -> None:
     )
 
     import logging
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(
+        logging.DEBUG, logger="joinly.providers.browser.platforms.google_meet"
+    ):
         asyncio.run(controller._check_joined(page, timeout=5.0))
 
     assert "Google Meet post-click probe" in caplog.text

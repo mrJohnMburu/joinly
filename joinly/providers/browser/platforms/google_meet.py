@@ -53,13 +53,31 @@ _ACTIVE_MEETING_CONTROL_PATTERNS = (
     re.compile(r"exit call", re.IGNORECASE),
     re.compile(r"hang up", re.IGNORECASE),
     re.compile(r"end call", re.IGNORECASE),
-    re.compile(r"turn (?:off|on) mic", re.IGNORECASE),
+    re.compile(r"turn (?:off|on) mic(?:rophone)?", re.IGNORECASE),
     re.compile(r"turn (?:off|on) camera", re.IGNORECASE),
 )
 _PREVIEW_JOIN_CONTROL_PATTERN = re.compile(
     r"(?:ask to join|request to join|join now|join meeting|join)",
     re.IGNORECASE,
 )
+_PARTICIPANTS_BUTTON_PATTERNS = (
+    re.compile(r"^people$", re.IGNORECASE),
+    re.compile(r"^participants$", re.IGNORECASE),
+    re.compile(r"^show everyone(?: and chat)?$", re.IGNORECASE),
+)
+_LEAVE_BUTTON_PATTERNS = (
+    re.compile(r"leave", re.IGNORECASE),
+    re.compile(r"exit call", re.IGNORECASE),
+    re.compile(r"hang up", re.IGNORECASE),
+    re.compile(r"end call", re.IGNORECASE),
+)
+_MUTE_BUTTON_PATTERNS = (
+    re.compile(r"^turn off mic(?:rophone)?", re.IGNORECASE),
+)
+_UNMUTE_BUTTON_PATTERNS = (
+    re.compile(r"^turn on mic(?:rophone)?", re.IGNORECASE),
+)
+_UI_WAKE_WAIT_MS = 250
 
 _T = TypeVar("_T")
 
@@ -167,9 +185,10 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page: The Playwright page instance.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
-        leave_btn = page.get_by_role("button", name=re.compile(r"leave", re.IGNORECASE))
-        if not await leave_btn.is_visible():
+        leave_btn = await self._find_visible_button(page, _LEAVE_BUTTON_PATTERNS)
+        if leave_btn is None:
             msg = "Leave button not found or not visible."
             raise RuntimeError(msg)
         await leave_btn.click(timeout=1000)
@@ -246,15 +265,16 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             list[MeetingParticipant]: A list of participants in the meeting.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
         participants_list = page.locator('div[aria-label="Participants"][role="list"]')
         is_participant_list_visible = await participants_list.is_visible()
 
         if not is_participant_list_visible:
-            participants_button = page.get_by_role(
-                "button", name=re.compile(r"^people", re.IGNORECASE)
+            participants_button = await self._find_visible_button(
+                page, _PARTICIPANTS_BUTTON_PATTERNS
             )
-            if not await participants_button.is_visible():
+            if participants_button is None:
                 msg = "Participants button not found or not visible."
                 raise RuntimeError(msg)
             await participants_button.click()
@@ -292,15 +312,12 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page: The Playwright page instance.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
-        mute_btn = page.get_by_role(
-            "button", name=re.compile(r"^turn off mic", re.IGNORECASE)
-        )
-        if await mute_btn.is_visible():
+        mute_btn = await self._find_visible_button(page, _MUTE_BUTTON_PATTERNS)
+        if mute_btn is not None:
             await mute_btn.click(timeout=1000)
-        elif not await page.get_by_role(
-            "button", name=re.compile(r"^turn on mic", re.IGNORECASE)
-        ).is_visible():
+        elif not await self._has_visible_button(page, _UNMUTE_BUTTON_PATTERNS):
             msg = "Mute button not found or not visible."
             raise RuntimeError(msg)
 
@@ -311,15 +328,12 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page: The Playwright page instance.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
-        unmute_btn = page.get_by_role(
-            "button", name=re.compile(r"^turn on mic", re.IGNORECASE)
-        )
-        if await unmute_btn.is_visible():
+        unmute_btn = await self._find_visible_button(page, _UNMUTE_BUTTON_PATTERNS)
+        if unmute_btn is not None:
             await unmute_btn.click(timeout=1000)
-        elif not await page.get_by_role(
-            "button", name=re.compile(r"^turn off mic", re.IGNORECASE)
-        ).is_visible():
+        elif not await self._has_visible_button(page, _MUTE_BUTTON_PATTERNS):
             msg = "Unmute button not found or not visible."
             raise RuntimeError(msg)
 
@@ -330,6 +344,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page: The Playwright page instance.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
         share_btn = page.get_by_role(
             "button",
@@ -348,6 +363,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page: The Playwright page instance.
         """
         await self._dismiss_dialog(page)
+        await self._wake_meeting_ui(page)
 
         stop_btn = page.get_by_role(
             "button",
@@ -381,7 +397,6 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         """
         deadline = time.monotonic() + timeout
         iteration = 0
-        transitioning_count = 0
 
         while time.monotonic() < deadline:
             iteration += 1
@@ -409,22 +424,9 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
                 return True
             if state == "failed":
                 return False
-
-            # "transitioning": preview controls gone but no active controls yet.
-            # Stabilise over several polls before treating it as joined so we
-            # do not return prematurely during the brief animation between
-            # click and the in-call UI appearing.
-            if state == "transitioning":
-                transitioning_count += 1
-                if transitioning_count >= _TRANSITIONING_SETTLE_COUNT:
-                    logger.info(
-                        "Google Meet join: assuming admitted after %d "
-                        "consecutive transitioning states.",
-                        transitioning_count,
-                    )
+            if state == "shell_active":
+                if await self._validate_shell_active_join(page):
                     return True
-            else:
-                transitioning_count = 0
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -445,6 +447,8 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         Returns one of:
             ``"preview"``      – prejoin UI is still visible
             ``"active"``       – in-call controls visible (mic/leave buttons)
+            ``"shell_active"`` – Meet reports in-call shell state but controls
+                                  are currently hidden
             ``"waiting"``      – waiting room / alone-in-room text present
             ``"failed"``       – terminal error text detected
             ``"transitioning"``– preview controls gone but in-call UI not yet
@@ -517,7 +521,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     // --- Active meeting controls (in-call UI visible) ---
     const activeLabels = [
         /leave/i, /exit call/i, /hang up/i, /end call/i,
-        /turn off mic/i, /turn on mic/i,
+        /turn off mic(?:rophone)?/i, /turn on mic(?:rophone)?/i,
         /turn off camera/i, /turn on camera/i,
     ];
     for (const btn of document.querySelectorAll('button[aria-label]')) {
@@ -525,6 +529,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         if (isVisible(btn) && activeLabels.some(rx => rx.test(label))) {
             return 'active';
         }
+    }
+
+    // --- Joined shell with controls currently hidden ---
+    if (document.querySelector('[data-in-call="true"]')) {
+        return 'shell_active';
     }
 
     // --- Transitioning: preview controls gone, in-call UI not yet visible ---
@@ -549,6 +558,54 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         action_btn = page.locator("div[role='dialog'] [data-mdc-dialog-action]")
         with contextlib.suppress(Exception):
             await action_btn.first.click(timeout=timeout)
+
+    async def _wake_meeting_ui(self, page: Page) -> None:
+        """Reveal transient in-call controls by nudging the pointer."""
+        mouse = getattr(page, "mouse", None)
+        if mouse is None:
+            return
+
+        viewport = getattr(page, "viewport_size", None) or {}
+        width = int(viewport.get("width", 1280))
+        height = int(viewport.get("height", 720))
+        points = (
+            (width // 2, max(height - 80, 0)),
+            (width // 2, height // 2),
+        )
+        with contextlib.suppress(Exception):
+            for x, y in points:
+                await mouse.move(x, y)
+            await page.wait_for_timeout(_UI_WAKE_WAIT_MS)
+
+    async def _find_visible_button(
+        self, page: Page, patterns: tuple[re.Pattern[str], ...]
+    ) -> Any | None:
+        """Return the first visible button matching any supplied label pattern."""
+        for pattern in patterns:
+            locator = page.get_by_role("button", name=pattern).first
+            if await self._locator_is_visible(locator):
+                return locator
+        return None
+
+    async def _has_visible_button(
+        self, page: Page, patterns: tuple[re.Pattern[str], ...]
+    ) -> bool:
+        """Return True when any matching button is visible."""
+        return await self._find_visible_button(page, patterns) is not None
+
+    async def _validate_shell_active_join(self, page: Page) -> bool:
+        """Validate an in-call shell by waking the UI and re-checking controls."""
+        await self._wake_meeting_ui(page)
+
+        post_wake_state = await self._classify_meeting_state(page)
+        if post_wake_state in {"active", "waiting"}:
+            return True
+
+        if await self._has_visible_button(page, _LEAVE_BUTTON_PATTERNS):
+            return True
+        if await self._has_visible_button(page, _PARTICIPANTS_BUTTON_PATTERNS):
+            return True
+        return False
 
     async def _has_active_meeting_controls(self, page: Page) -> bool:
         """Return True when in-call controls are already visible."""
