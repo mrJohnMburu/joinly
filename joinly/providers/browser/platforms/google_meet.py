@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 _TIME_RX = re.compile(r"^\d{1,2}:\d{2}(?:[AP]M)?$", re.IGNORECASE)
 _MAX_MESSAGE_LENGTH = 500
 _MAX_NAVIGATION_HTML_LOG_CHARS = 240
+_NAVIGATION_TIMEOUT_MS = 20000
+_NAVIGATION_STEP_DEADLINE_SECONDS = 25.0
 
 
 class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
@@ -54,8 +56,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         """
         logger.debug("Google Meet join: navigating to %s", url)
         try:
-            await page.goto(url, wait_until="commit", timeout=20000)
-        except PlaywrightTimeoutError:
+            await asyncio.wait_for(
+                page.goto(url, wait_until="commit", timeout=_NAVIGATION_TIMEOUT_MS),
+                timeout=_NAVIGATION_STEP_DEADLINE_SECONDS,
+            )
+        except (PlaywrightTimeoutError, TimeoutError):
             await self._log_navigation_timeout(page, target_url=url)
             raise
         logger.debug("Google Meet join: navigation committed")

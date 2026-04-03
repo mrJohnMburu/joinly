@@ -97,6 +97,34 @@ class _FillTimeoutPage(_StubPage):
         return b"png"
 
 
+class _SlowGotoPage(_StubPage):
+    def __init__(self, *, delay_seconds: float) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+        self.url = "https://meet.google.com/loading"
+        self.screenshot_calls: list[dict[str, object]] = []
+
+    async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append((url, wait_until, timeout))
+        await asyncio.sleep(self.delay_seconds)
+
+    async def title(self) -> str:
+        return "Loading"
+
+    async def content(self) -> str:
+        return """
+        <html>
+          <body>
+            Loading Google Meet...
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        return b"png"
+
+
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         module_name,
@@ -218,3 +246,28 @@ def test_google_meet_join_logs_name_field_timeout_context(caplog) -> None:
     assert "step=name_field.fill" in caplog.text
     assert "https://meet.google.com/landing" in caplog.text
     assert "Ready to join?" in caplog.text
+
+
+def test_google_meet_join_enforces_outer_navigation_timeout(monkeypatch, caplog) -> None:
+    google_meet_module = _load_google_meet_module()
+    monkeypatch.setattr(google_meet_module, "_NAVIGATION_STEP_DEADLINE_SECONDS", 0.01)
+
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _SlowGotoPage(delay_seconds=0.05)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(TimeoutError):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+
+    assert page.goto_calls == [
+        ("https://meet.google.com/test-call", "commit", 20000)
+    ]
+    assert page.screenshot_calls
+    assert "Google Meet navigation timed out" in caplog.text
+    assert "Loading Google Meet..." in caplog.text
