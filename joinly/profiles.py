@@ -30,6 +30,7 @@ _PROFILES: dict[str, DeploymentProfile] = {
             "tts": "deepgram",
             "meeting_provider_args": {
                 "audio_only": True,
+                "browser_software_rendering": True,
                 "display_size": (1024, 576),
                 "snapshot_size": (384, 216),
                 "browser_net_log_path": "/tmp/joinly-chromium-netlog.json",

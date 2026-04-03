@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import tempfile
@@ -25,6 +26,7 @@ class BrowserSession:
         profile_dir: str | Path | None = None,
         net_log_path: str | Path | None = None,
         window_size: tuple[int, int] = (1280, 720),
+        software_rendering: bool = False,
     ) -> None:
         """Initialize the browser params.
 
@@ -37,6 +39,8 @@ class BrowserSession:
                 reused across runs instead of creating a temporary profile.
             net_log_path: Optional Chromium net log output path.
             window_size: Browser window size passed to Chromium.
+            software_rendering: Whether to prefer SwiftShader-backed software
+                rendering instead of the default Pi/browser flags.
         """
         self._env: dict[str, str] = env if env is not None else os.environ.copy()
         self._cdp_port: int = cdp_port
@@ -46,6 +50,7 @@ class BrowserSession:
         )
         self._net_log_path = Path(net_log_path).expanduser() if net_log_path else None
         self._window_size = window_size
+        self._software_rendering = software_rendering
 
         self._profile_dir: tempfile.TemporaryDirectory | None = None
         self._profile_path: Path | None = None
@@ -87,36 +92,7 @@ class BrowserSession:
 
         profile_dir = self._get_profile_dir()
         logger.debug("Profile directory ready at: %s", profile_dir)
-        chromium_args = [
-            "--use-fake-ui-for-media-stream",
-            "--alsa-output-device=pulse",
-            f"--alsa-input-device={self._env.get('PULSE_SOURCE')}",
-            "--autoplay-policy=no-user-gesture-required",
-            "--allow-http-screen-capture",
-            "--auto-select-desktop-capture-source=Entire",
-            "--enable-usermedia-screen-capturing",
-            "--enable-features=WebRTCPipeWireCapturer",
-            "--ozone-platform=x11",
-            "--disable-gpu",
-            "--disable-focus-on-load",
-            f"--window-size={self._window_size[0]},{self._window_size[1]}",
-            "--lang=en-US",
-            "--test-type",
-            "--no-sandbox",  # required for docker
-            "--disable-dev-shm-usage",
-            "--disable-gpu-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--no-xshm",
-            "--force-device-scale-factor=1",
-            # Disable keyring/OSCrypt access: on Linux, without this Chromium tries to
-            # encrypt cookies via gnome-keyring/D-Bus secret service at page load time.
-            # A locked keyring (e.g. fresh boot/login) blocks Chromium here indefinitely.
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "--disable-features=TranslateUI,MediaRouter,WebRtcAutomaticGainControl",
-            "--disable-backgrounding-occluded-windows",
-        ]
+        chromium_args = self._build_chromium_args()
         if self._net_log_path is not None:
             self._net_log_path.parent.mkdir(parents=True, exist_ok=True)
             chromium_args.extend(
@@ -143,6 +119,55 @@ class BrowserSession:
         logger.debug("Playwright started.")
 
         return self
+
+    def _build_chromium_args(self) -> list[str]:
+        disable_features = [
+            "TranslateUI",
+            "MediaRouter",
+            "WebRtcAutomaticGainControl",
+        ]
+        chromium_args = [
+            "--use-fake-ui-for-media-stream",
+            "--alsa-output-device=pulse",
+            f"--alsa-input-device={self._env.get('PULSE_SOURCE')}",
+            "--autoplay-policy=no-user-gesture-required",
+            "--allow-http-screen-capture",
+            "--auto-select-desktop-capture-source=Entire",
+            "--enable-usermedia-screen-capturing",
+            "--enable-features=WebRTCPipeWireCapturer",
+            "--ozone-platform=x11",
+            "--disable-focus-on-load",
+            f"--window-size={self._window_size[0]},{self._window_size[1]}",
+            "--lang=en-US",
+            "--test-type",
+            "--no-sandbox",  # required for docker
+            "--disable-dev-shm-usage",
+            "--disable-gpu-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--no-xshm",
+            "--force-device-scale-factor=1",
+            # Disable keyring/OSCrypt access: on Linux, without this Chromium tries to
+            # encrypt cookies via gnome-keyring/D-Bus secret service at page load time.
+            # A locked keyring (e.g. fresh boot/login) blocks Chromium here indefinitely.
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--disable-backgrounding-occluded-windows",
+        ]
+        if self._software_rendering:
+            disable_features.extend(["Vulkan", "UseSkiaRenderer"])
+            chromium_args.extend(
+                [
+                    "--use-gl=angle",
+                    "--use-angle=swiftshader",
+                    "--enable-unsafe-swiftshader",
+                ]
+            )
+        else:
+            chromium_args.append("--disable-gpu")
+
+        chromium_args.append(f"--disable-features={','.join(disable_features)}")
+        return chromium_args
 
     async def __aexit__(self, *exc: object) -> None:
         """Stop the browser."""
@@ -184,13 +209,39 @@ class BrowserSession:
             page = await self._pw_context.new_page()
             logger.debug("New page created in the browser context.")
 
+        self._attach_page_listeners(page)
+        if page not in self._pages:
+            self._pages.append(page)
+
+        return page
+
+    def _attach_page_listeners(self, page: Page) -> None:
         page.on(
             "console",
             lambda msg: logger.log(
                 LOGGING_TRACE, "[console][%s] %s", msg.type, msg.text
             ),
         )
-        if page not in self._pages:
-            self._pages.append(page)
+        page.on(
+            "pageerror",
+            lambda exc: logger.warning("Playwright pageerror: %s", exc),
+        )
+        page.on(
+            "requestfailed",
+            lambda request: logger.warning(
+                "Playwright request failed: url=%s failure=%s",
+                getattr(request, "url", "<unknown>"),
+                self._request_failure_text(request),
+            ),
+        )
 
-        return page
+    @staticmethod
+    def _request_failure_text(request: object) -> str:
+        with contextlib.suppress(Exception):
+            failure = getattr(request, "failure")
+            details = failure() if callable(failure) else failure
+            if isinstance(details, dict):
+                return str(details.get("errorText") or details)
+            if details:
+                return str(details)
+        return "<unknown>"

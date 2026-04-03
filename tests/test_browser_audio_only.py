@@ -303,6 +303,7 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
     provider = meeting_provider_module.BrowserMeetingProvider(
         audio_only=True,
         display_size=(1024, 576),
+        browser_software_rendering=True,
         browser_net_log_path="/tmp/joinly-chromium-netlog.json",
         google_meet_preflight_urls=(
             "https://www.google.com",
@@ -320,6 +321,7 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
     assert provider._browser_session.kwargs["net_log_path"] == (
         "/tmp/joinly-chromium-netlog.json"
     )
+    assert provider._browser_session.kwargs["software_rendering"] is True
     assert provider._browser_session.kwargs["window_size"] == (1024, 576)
     assert len(_StubGoogleMeetController.instances) == 1
     assert _StubGoogleMeetController.instances[0].navigation_preflight_urls == (

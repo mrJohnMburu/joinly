@@ -157,6 +157,45 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
     assert fake_playwright.chromium.context.close_calls == 1
 
 
+def test_browser_session_software_rendering_uses_swiftshader_flags(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fake_playwright = _FakePlaywright("/playwright/chromium")
+
+    monkeypatch.setattr(
+        browser_session_module,
+        "async_playwright",
+        lambda: _FakePlaywrightStarter(fake_playwright),
+    )
+
+    executable_path = tmp_path / "chromium"
+    executable_path.write_text("")
+    session = BrowserSession(
+        executable_path=str(executable_path),
+        software_rendering=True,
+    )
+
+    async def scenario() -> None:
+        await session.__aenter__()
+        try:
+            launch_kwargs = fake_playwright.chromium.launch_calls[0]
+            args = launch_kwargs["args"]
+            assert "--disable-gpu" not in args
+            assert "--use-gl=angle" in args
+            assert "--use-angle=swiftshader" in args
+            assert "--enable-unsafe-swiftshader" in args
+            assert any(
+                arg.startswith("--disable-features=")
+                and "Vulkan" in arg
+                and "UseSkiaRenderer" in arg
+                for arg in args
+            )
+        finally:
+            await session.__aexit__()
+
+    asyncio.run(scenario())
+
+
 def test_browser_session_creates_and_cleans_up_temporary_profile(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -216,6 +255,11 @@ def test_browser_session_reuses_default_page_before_creating_new_pages(
             second_page = await session.get_page()
             assert first_page is default_page
             assert second_page is not default_page
+            assert {event for event, _ in first_page.listeners} == {
+                "console",
+                "pageerror",
+                "requestfailed",
+            }
         finally:
             await session.__aexit__()
 

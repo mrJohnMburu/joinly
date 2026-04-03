@@ -82,6 +82,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         browser_executable_path: str | None = None,
         browser_profile_dir: str | None = None,
         browser_net_log_path: str | None = None,
+        browser_software_rendering: bool = False,
         google_meet_preflight_urls: tuple[str, ...] = (),
         google_meet_debug_artifact_dir: str | None = None,
         audio_only: bool = False,
@@ -103,6 +104,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
                 provided, the Playwright Chromium binary is used.
             browser_profile_dir: Optional persistent browser profile directory.
             browser_net_log_path: Optional Chromium net log output path.
+            browser_software_rendering: Whether to opt into a SwiftShader-backed
+                software rendering profile for Chromium.
             google_meet_preflight_urls: Optional diagnostic URLs to probe before
                 navigating to the full Google Meet join URL.
             google_meet_debug_artifact_dir: Optional directory for Google Meet
@@ -139,6 +142,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
             profile_dir=browser_profile_dir,
             net_log_path=browser_net_log_path,
             window_size=display_size,
+            software_rendering=browser_software_rendering,
         )
         self._services = [
             self._pulse_server,
