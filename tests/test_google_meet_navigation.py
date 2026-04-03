@@ -1,8 +1,15 @@
 import asyncio
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType
+
+import pytest
+
+
+class _StubPlaywrightTimeoutError(Exception):
+    pass
 
 
 class _StubLocator:
@@ -33,6 +40,33 @@ class _StubPage:
         return self.join_button
 
 
+class _TimeoutPage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = "https://accounts.google.com/signin"
+        self.screenshot_calls: list[dict[str, object]] = []
+
+    async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append((url, wait_until, timeout))
+        raise _StubPlaywrightTimeoutError("timed out")
+
+    async def title(self) -> str:
+        return "Sign in"
+
+    async def content(self) -> str:
+        return """
+        <html>
+          <body>
+            Sign in to continue to Google Meet
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        return b"png"
+
+
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         module_name,
@@ -50,6 +84,7 @@ def _load_google_meet_module() -> ModuleType:
     playwright_module = ModuleType("playwright")
     playwright_async_api = ModuleType("playwright.async_api")
     playwright_async_api.Page = object
+    playwright_async_api.TimeoutError = _StubPlaywrightTimeoutError
     sys.modules.setdefault("playwright", playwright_module)
     sys.modules["playwright.async_api"] = playwright_async_api
     playwright_module.async_api = playwright_async_api
@@ -102,3 +137,28 @@ def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkey
     ]
     assert page.name_field.fill_calls == [("OpenClaw", 60000)]
     assert page.join_button.click_calls == [1000]
+
+
+def test_google_meet_join_logs_navigation_timeout_context(caplog) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _TimeoutPage()
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(_StubPlaywrightTimeoutError):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+
+    assert page.goto_calls == [
+        ("https://meet.google.com/test-call", "commit", 20000)
+    ]
+    assert page.screenshot_calls
+    assert "Google Meet navigation timed out" in caplog.text
+    assert "https://accounts.google.com/signin" in caplog.text
+    assert "Sign in" in caplog.text
+    assert "Sign in to continue to Google Meet" in caplog.text

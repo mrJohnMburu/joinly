@@ -1,16 +1,24 @@
 import asyncio
 import contextlib
+import logging
 import re
+import tempfile
+import time
+from pathlib import Path
 from typing import Any, ClassVar
 
 from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from joinly.providers.browser.platforms.base import BaseBrowserPlatformController
 from joinly.settings import get_settings
 from joinly.types import MeetingChatHistory, MeetingChatMessage, MeetingParticipant
 
+logger = logging.getLogger(__name__)
+
 _TIME_RX = re.compile(r"^\d{1,2}:\d{2}(?:[AP]M)?$", re.IGNORECASE)
 _MAX_MESSAGE_LENGTH = 500
+_MAX_NAVIGATION_HTML_LOG_CHARS = 240
 
 
 class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
@@ -44,7 +52,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             name: The name of the participant.
             passcode: The passcode for the meeting (if required).
         """
-        await page.goto(url, wait_until="commit", timeout=20000)
+        try:
+            await page.goto(url, wait_until="commit", timeout=20000)
+        except PlaywrightTimeoutError:
+            await self._log_navigation_timeout(page, target_url=url)
+            raise
 
         name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
         await name_field.fill(name, timeout=60000)
@@ -297,6 +309,46 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         action_btn = page.locator("div[role='dialog'] [data-mdc-dialog-action]")
         with contextlib.suppress(Exception):
             await action_btn.first.click(timeout=timeout)
+
+    async def _log_navigation_timeout(self, page: Page, *, target_url: str) -> None:
+        """Log browser state when Google Meet navigation stalls."""
+        current_url = getattr(page, "url", "<unavailable>")
+        title = "<unavailable>"
+        html_snippet = "<unavailable>"
+        screenshot_path = "<unavailable>"
+
+        with contextlib.suppress(Exception):
+            title = await page.title()
+
+        with contextlib.suppress(Exception):
+            html_snippet = self._summarize_html(await page.content())
+
+        with contextlib.suppress(Exception):
+            screenshot_path = str(
+                Path(tempfile.gettempdir())
+                / f"joinly-google-meet-timeout-{int(time.time() * 1000)}.png"
+            )
+            await page.screenshot(path=screenshot_path, type="png")
+
+        logger.error(
+            "Google Meet navigation timed out "
+            "(target_url=%s current_url=%s title=%r screenshot_path=%s html_snippet=%s)",
+            target_url,
+            current_url,
+            title,
+            screenshot_path,
+            html_snippet,
+        )
+
+    @staticmethod
+    def _summarize_html(content: str) -> str:
+        """Return a compact HTML snippet for timeout diagnostics."""
+        squashed = re.sub(r"\s+", " ", content).strip()
+        if not squashed:
+            return "<empty>"
+        if len(squashed) <= _MAX_NAVIGATION_HTML_LOG_CHARS:
+            return squashed
+        return squashed[: _MAX_NAVIGATION_HTML_LOG_CHARS - 3] + "..."
 
     async def _open_chat(self, page: Page) -> None:
         """Open the chat in the Google Meet meeting."""
