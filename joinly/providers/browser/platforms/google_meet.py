@@ -488,7 +488,8 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             )
 
             if state == "active":
-                return True
+                if await self._validate_active_join(page):
+                    return True
             if state == "waiting":
                 return True
             if state == "failed":
@@ -504,6 +505,23 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
                 min(_POST_CLICK_POLL_INTERVAL_MS, int(remaining * 1000))
             )
 
+        return False
+
+    async def _validate_active_join(self, page: Page) -> bool:
+        """Confirm an active classification is not still the preview shell."""
+        if await self._preview_join_controls_visible(page):
+            logger.debug(
+                "Google Meet active-state validation rejected a preview shell "
+                "because join controls are still visible"
+            )
+            return False
+
+        await self._wake_meeting_ui(page)
+
+        if await self._has_active_meeting_controls(page):
+            return True
+        if await self._has_visible_button(page, _PARTICIPANTS_BUTTON_PATTERNS):
+            return True
         return False
 
     async def _classify_meeting_state(self, page: Page) -> str:

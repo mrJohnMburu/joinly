@@ -1109,6 +1109,21 @@ def test_google_meet_check_joined_rejects_live_meet_url_without_waiting_or_in_ca
     assert result is False
 
 
+def test_google_meet_check_joined_rejects_active_state_when_preview_join_controls_remain() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html='<html><body><div data-in-call="true"></div></body></html>',
+        visible_button_labels=("Ask to join", "Leave call"),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=1.0))
+
+    assert result is False
+
+
 def test_google_meet_check_joined_rejects_terminal_failure_text_state() -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
