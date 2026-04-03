@@ -32,6 +32,10 @@ _POST_CLICK_POLL_INTERVAL_MS = 500
 _CLASSIFY_STATE_TIMEOUT_SECONDS = 5.0
 _TRANSITIONING_SETTLE_COUNT = 3
 _ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS = 3.0
+_ACCESS_DENIED_MESSAGE = (
+    "Google Meet denied access. The meeting may require the host to admit "
+    "guests or a signed-in Google account."
+)
 
 _WAITING_ROOM_TEXT_PATTERNS = (
     re.compile(r"asking to be let in", re.IGNORECASE),
@@ -137,11 +141,22 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             raise
         logger.debug("Google Meet join: navigation committed")
 
+        await self._raise_if_access_denied(
+            page,
+            target_url=url,
+            step="post_navigation.access_denied",
+        )
+
         name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
         logger.debug("Google Meet join: waiting for guest name field")
         try:
             await name_field.fill(name, timeout=60000)
         except PlaywrightTimeoutError:
+            await self._raise_if_access_denied(
+                page,
+                target_url=url,
+                step="name_field.access_denied",
+            )
             await self._log_join_step_timeout(
                 page,
                 target_url=url,
@@ -173,6 +188,11 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         await self._capture_debug_snapshot(page, stage="post_click")
 
         if not await self._check_joined(page):
+            await self._raise_if_access_denied(
+                page,
+                target_url=url,
+                step="post_click.access_denied",
+            )
             await self._log_join_step_timeout(
                 page,
                 target_url=url,
@@ -183,6 +203,25 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             raise RuntimeError(msg)
 
         await self._setup_active_speaker_observer_with_timeout(page)
+
+    async def _raise_if_access_denied(
+        self,
+        page: Page,
+        *,
+        target_url: str,
+        step: str,
+    ) -> None:
+        """Raise a clear error when Meet reports room-level access denial."""
+        if await self._classify_meeting_state(page) != "failed":
+            return
+
+        await self._log_join_step_timeout(
+            page,
+            target_url=target_url,
+            step=step,
+            message=_ACCESS_DENIED_MESSAGE,
+        )
+        raise RuntimeError(_ACCESS_DENIED_MESSAGE)
 
     async def leave(self, page: Page) -> None:
         """Leave the Google Meet meeting.

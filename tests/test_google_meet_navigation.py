@@ -134,6 +134,32 @@ class _JoinCheckFailurePage(_StubPage):
         return b"png"
 
 
+class _JoinDeniedPage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = "https://meet.google.com/test-call"
+        self.screenshot_calls: list[dict[str, object]] = []
+
+    async def title(self) -> str:
+        return "Meet"
+
+    async def content(self) -> str:
+        return """
+        <html>
+          <body>
+            <main>
+              <div>You can't join this video call</div>
+              <div>No one can join a meeting unless invited or admitted by the host</div>
+            </main>
+          </body>
+        </html>
+        """
+
+    async def screenshot(self, **kwargs: object) -> bytes:
+        self.screenshot_calls.append(dict(kwargs))
+        return b"png"
+
+
 class _DebugCapturePage(_StubPage):
     def __init__(self) -> None:
         super().__init__()
@@ -800,6 +826,66 @@ def test_google_meet_join_logs_state_when_post_click_join_check_fails(
     assert page.screenshot_calls
     assert "Google Meet join did not reach active or waiting state" in caplog.text
     assert "No one else is here yet" in caplog.text
+
+
+def test_google_meet_join_fails_fast_when_navigation_lands_on_terminal_failure(
+    monkeypatch, caplog
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinDeniedPage()
+
+    async def _classify_meeting_state(_page: object) -> str:
+        return "failed"
+
+    monkeypatch.setattr(controller, "_classify_meeting_state", _classify_meeting_state)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="Google Meet denied access"):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+
+    assert not page.name_field.fill_calls
+    assert not page.join_button.click_calls
+    assert "post_navigation.access_denied" in caplog.text
+
+
+def test_google_meet_join_reports_terminal_failure_after_post_click_check(
+    monkeypatch, caplog
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinDeniedPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return False
+
+    states = iter(["preview", "failed"])
+
+    async def _classify_meeting_state(_page: object) -> str:
+        return next(states)
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(controller, "_classify_meeting_state", _classify_meeting_state)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="Google Meet denied access"):
+            asyncio.run(
+                controller.join(
+                    page,
+                    "https://meet.google.com/test-call",
+                    name="OpenClaw",
+                )
+            )
+
+    assert page.name_field.fill_calls == [("OpenClaw", 60000)]
+    assert page.join_button.click_calls
+    assert "post_click.access_denied" in caplog.text
 
 
 def test_google_meet_join_captures_debug_artifacts_when_configured(
