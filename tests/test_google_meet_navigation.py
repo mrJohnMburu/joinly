@@ -541,3 +541,43 @@ def test_google_meet_check_joined_rejects_terminal_failure_text_state() -> None:
     result = asyncio.run(controller._check_joined(page, timeout=0.01))
 
     assert result is False
+
+
+def test_google_meet_join_does_not_block_on_active_speaker_setup_timeout(
+    monkeypatch, caplog
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    monkeypatch.setattr(
+        google_meet_module,
+        "_ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS",
+        0.01,
+    )
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _StubPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    started_at = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            controller.join(
+                page,
+                "https://meet.google.com/test-call",
+                name="OpenClaw",
+            )
+        )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.05
+    assert "Active speaker observer setup timed out" in caplog.text

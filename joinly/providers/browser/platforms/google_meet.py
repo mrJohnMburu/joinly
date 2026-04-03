@@ -28,6 +28,7 @@ _PREFLIGHT_NAVIGATION_TIMEOUT_MS = 10000
 _PREFLIGHT_STEP_DEADLINE_SECONDS = 12.0
 _POST_CLICK_JOIN_TIMEOUT_SECONDS = 20.0
 _POST_CLICK_POLL_INTERVAL_MS = 250
+_ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS = 3.0
 
 _WAITING_ROOM_TEXT_PATTERNS = (
     re.compile(r"asking to be let in", re.IGNORECASE),
@@ -148,7 +149,7 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             msg = "Join check failed: Failed to join the Google Meet meeting."
             raise RuntimeError(msg)
 
-        await self._setup_active_speaker_observer(page)
+        await self._setup_active_speaker_observer_with_timeout(page)
 
     async def leave(self, page: Page) -> None:
         """Leave the Google Meet meeting.
@@ -586,6 +587,18 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page.goto(url, wait_until=wait_until, timeout=timeout_ms),
             timeout=deadline_seconds,
         )
+
+    async def _setup_active_speaker_observer_with_timeout(self, page: Page) -> None:
+        """Try to enable active speaker tracking without blocking the join."""
+        try:
+            await asyncio.wait_for(
+                self._setup_active_speaker_observer(page),
+                timeout=_ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("Active speaker observer setup timed out.")
+        except Exception:
+            logger.warning("Active speaker observer setup failed.", exc_info=True)
 
     async def _open_chat(self, page: Page) -> None:
         """Open the chat in the Google Meet meeting."""
