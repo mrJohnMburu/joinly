@@ -96,6 +96,14 @@ uv sync --extra openclaw-pi
 uv run joinly --profile openclaw-pi --host 0.0.0.0 --port 8000
 ```
 
+If you prefer a plain `venv` + `pip` install from a Git checkout, use the workspace installer so `pip` reuses the local `common/` and `client/` packages instead of resolving the published workspace packages from PyPI:
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m joinly.workspace_install --extra openclaw-pi
+.venv/bin/joinly --profile openclaw-pi --host 0.0.0.0 --port 8000
+```
+
 Build the dedicated image from this fork:
 ```bash
 docker build -f docker/Dockerfile.openclaw -t joinly-openclaw:local .
