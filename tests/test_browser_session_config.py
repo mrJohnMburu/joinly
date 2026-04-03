@@ -180,7 +180,13 @@ def test_browser_session_software_rendering_uses_swiftshader_flags(
         try:
             launch_kwargs = fake_playwright.chromium.launch_calls[0]
             args = launch_kwargs["args"]
+            assert launch_kwargs["ignore_default_args"] == [
+                "--mute-audio",
+                "--use-angle=gles",
+                "--enable-gpu-rasterization",
+            ]
             assert "--disable-gpu" not in args
+            assert "--disable-gpu-rasterization" in args
             assert "--use-gl=angle" in args
             assert "--use-angle=swiftshader" in args
             assert "--enable-unsafe-swiftshader" in args

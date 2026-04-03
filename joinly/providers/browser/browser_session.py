@@ -109,7 +109,7 @@ class BrowserSession:
             executable_path=str(bin_path),
             headless=False,
             chromium_sandbox=False,
-            ignore_default_args=["--mute-audio"],
+            ignore_default_args=self._build_ignore_default_args(),
             args=chromium_args,
             env=self._env,
         )
@@ -158,6 +158,7 @@ class BrowserSession:
             disable_features.extend(["Vulkan", "UseSkiaRenderer"])
             chromium_args.extend(
                 [
+                    "--disable-gpu-rasterization",
                     "--use-gl=angle",
                     "--use-angle=swiftshader",
                     "--enable-unsafe-swiftshader",
@@ -168,6 +169,17 @@ class BrowserSession:
 
         chromium_args.append(f"--disable-features={','.join(disable_features)}")
         return chromium_args
+
+    def _build_ignore_default_args(self) -> list[str]:
+        ignored = ["--mute-audio"]
+        if self._software_rendering:
+            ignored.extend(
+                [
+                    "--use-angle=gles",
+                    "--enable-gpu-rasterization",
+                ]
+            )
+        return ignored
 
     async def __aexit__(self, *exc: object) -> None:
         """Stop the browser."""
