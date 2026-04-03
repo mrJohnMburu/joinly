@@ -71,7 +71,7 @@ def _load_google_meet_module() -> ModuleType:
     )
 
 
-def test_google_meet_join_uses_domcontentloaded_navigation(monkeypatch) -> None:
+def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkeypatch) -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
     page = _StubPage()
@@ -98,7 +98,7 @@ def test_google_meet_join_uses_domcontentloaded_navigation(monkeypatch) -> None:
     )
 
     assert page.goto_calls == [
-        ("https://meet.google.com/test-call", "domcontentloaded", 60000)
+        ("https://meet.google.com/test-call", "commit", 20000)
     ]
-    assert page.name_field.fill_calls == [("OpenClaw", 20000)]
+    assert page.name_field.fill_calls == [("OpenClaw", 60000)]
     assert page.join_button.click_calls == [1000]
