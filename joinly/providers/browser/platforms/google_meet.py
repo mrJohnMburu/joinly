@@ -26,8 +26,10 @@ _NAVIGATION_STEP_DEADLINE_SECONDS = 25.0
 _DIAGNOSTIC_STEP_DEADLINE_SECONDS = 1.0
 _PREFLIGHT_NAVIGATION_TIMEOUT_MS = 10000
 _PREFLIGHT_STEP_DEADLINE_SECONDS = 12.0
-_POST_CLICK_JOIN_TIMEOUT_SECONDS = 20.0
-_POST_CLICK_POLL_INTERVAL_MS = 250
+_POST_CLICK_JOIN_TIMEOUT_SECONDS = 30.0
+_POST_CLICK_POLL_INTERVAL_MS = 500
+_CLASSIFY_STATE_TIMEOUT_SECONDS = 5.0
+_TRANSITIONING_SETTLE_COUNT = 3
 _ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS = 3.0
 
 _WAITING_ROOM_TEXT_PATTERNS = (
@@ -357,39 +359,162 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
     ) -> bool:  # noqa: ASYNC109
         """Check if the Google Meet meeting has been joined successfully.
 
+        Uses a single in-page JS evaluation per poll cycle instead of multiple
+        Playwright locator roundtrips.  On ARM hardware (Raspberry Pi 5) each
+        Playwright CDP call adds significant overhead; replacing 8-10 roundtrips
+        with one keeps every iteration under ~2 seconds instead of ~14 seconds.
+
         Args:
             page: The Playwright page instance.
             timeout: The timeout in seconds for checking the join status.
 
         Returns:
-            bool: True if joined, False otherwise.
+            bool: True if joined (active or waiting-room), False on terminal
+                failure, False on timeout.
         """
         deadline = time.monotonic() + timeout
+        iteration = 0
+        transitioning_count = 0
+
         while time.monotonic() < deadline:
+            iteration += 1
+            iter_start = time.monotonic()
+
             await self._dismiss_dialog(page, timeout=0)
 
-            if await self._has_active_meeting_controls(page):
-                return True
+            state = await self._classify_meeting_state(page)
 
-            page_text = await self._read_page_text(page)
-            if self._matches_any_pattern(page_text, _TERMINAL_FAILURE_TEXT_PATTERNS):
+            iter_elapsed = time.monotonic() - iter_start
+            logger.debug(
+                "Google Meet post-click probe "
+                "iteration=%d state=%s elapsed=%.2fs remaining=%.1fs",
+                iteration,
+                state,
+                iter_elapsed,
+                deadline - time.monotonic(),
+            )
+
+            if state == "active":
+                return True
+            if state == "waiting":
+                return True
+            if state == "failed":
                 return False
 
-            if self._matches_any_pattern(page_text, _WAITING_ROOM_TEXT_PATTERNS):
-                return True
+            # "transitioning": preview controls gone but no active controls yet.
+            # Stabilise over several polls before treating it as joined so we
+            # do not return prematurely during the brief animation between
+            # click and the in-call UI appearing.
+            if state == "transitioning":
+                transitioning_count += 1
+                if transitioning_count >= _TRANSITIONING_SETTLE_COUNT:
+                    logger.info(
+                        "Google Meet join: assuming admitted after %d "
+                        "consecutive transitioning states.",
+                        transitioning_count,
+                    )
+                    return True
+            else:
+                transitioning_count = 0
 
-            current_url = getattr(page, "url", "")
-            if self._looks_like_live_meeting_url(current_url) and not await self._preview_join_controls_visible(page):
-                return True
-
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
             await page.wait_for_timeout(
-                min(_POST_CLICK_POLL_INTERVAL_MS, int(remaining_seconds * 1000))
+                min(_POST_CLICK_POLL_INTERVAL_MS, int(remaining * 1000))
             )
 
         return False
+
+    async def _classify_meeting_state(self, page: Page) -> str:
+        """Classify the current Google Meet page state via a single JS call.
+
+        Replaces multiple Playwright locator roundtrips with one CDP message.
+        The JS runs inside the renderer process so it has zero serialisation
+        overhead for the DOM — it only returns a short state string.
+
+        Returns one of:
+            ``"active"``       – in-call controls visible (mic/leave buttons)
+            ``"waiting"``      – waiting room / alone-in-room text present
+            ``"failed"``       – terminal error text detected
+            ``"transitioning"``– preview controls gone but in-call UI not yet
+            ``"unknown"``      – nothing matched; keep polling
+        """
+        _js = """
+() => {
+    const lower = (document.body && document.body.innerText)
+        ? document.body.innerText.toLowerCase()
+        : '';
+
+    // --- Terminal failure ---
+    const failures = [
+        "you can't join this video call",
+        "you can't join this meeting",
+        "meeting code is invalid",
+        "couldn't find the meeting",
+        "this meeting has ended",
+        "meeting has ended",
+        "call has ended",
+    ];
+    for (const f of failures) {
+        if (lower.includes(f)) return 'failed';
+    }
+
+    // --- Active meeting controls (in-call UI visible) ---
+    // Use offsetParent as a fast visibility proxy (null == hidden/display:none).
+    const activeLabels = [
+        /leave/i, /exit call/i, /hang up/i, /end call/i,
+        /turn off mic/i, /turn on mic/i,
+        /turn off camera/i, /turn on camera/i,
+    ];
+    for (const btn of document.querySelectorAll('button[aria-label]')) {
+        const label = btn.getAttribute('aria-label') || '';
+        if (btn.offsetParent !== null &&
+                activeLabels.some(rx => rx.test(label))) {
+            return 'active';
+        }
+    }
+
+    // --- Waiting room / alone-in-room ---
+    const waiting = [
+        'asking to be let in',
+        'someone lets you in',
+        'no one else is here yet',
+        "you're the first one here",
+        'waiting for the host',
+        'waiting for others',
+        'waiting for organizer',
+        "meeting hasn't started",
+        'meeting has not started',
+    ];
+    for (const w of waiting) {
+        if (lower.includes(w)) return 'waiting';
+    }
+
+    // --- Transitioning: preview controls gone, in-call UI not yet visible ---
+    const hasNameField = !!document.querySelector(
+        'input[placeholder], input[aria-label]'
+    );
+    const hasJoinBtn = [...document.querySelectorAll('button')].some(b => {
+        const t = (b.textContent || '') + (b.getAttribute('aria-label') || '');
+        return /^(?!.*other ways).*join.*/i.test(t);
+    });
+    if (!hasNameField && !hasJoinBtn) return 'transitioning';
+
+    return 'unknown';
+}
+"""
+        try:
+            result = await asyncio.wait_for(
+                page.evaluate(_js),
+                timeout=_CLASSIFY_STATE_TIMEOUT_SECONDS,
+            )
+            return result if isinstance(result, str) else "unknown"
+        except Exception:
+            logger.debug(
+                "Meeting state classification failed", exc_info=True
+            )
+            return "unknown"
 
     async def _dismiss_dialog(self, page: Page, timeout: int = 100) -> None:  # noqa: ASYNC109
         """Dismiss any popups that may appear."""

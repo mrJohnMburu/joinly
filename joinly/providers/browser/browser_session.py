@@ -106,6 +106,11 @@ class BrowserSession:
             "--disable-blink-features=AutomationControlled",
             "--no-xshm",
             "--force-device-scale-factor=1",
+            # Disable keyring/OSCrypt access: on Linux, without this Chromium tries to
+            # encrypt cookies via gnome-keyring/D-Bus secret service at page load time.
+            # A locked keyring (e.g. fresh boot/login) blocks Chromium here indefinitely.
+            "--password-store=basic",
+            "--use-mock-keychain",
             "--disable-features=TranslateUI,MediaRouter,WebRtcAutomaticGainControl",
             "--disable-backgrounding-occluded-windows",
         ]

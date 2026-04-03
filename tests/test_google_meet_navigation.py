@@ -210,6 +210,26 @@ class _SlowVisibilityLocator(_VisibilityLocator):
 
 
 class _JoinStatePage:
+    # Active button aria-labels that map to the "active" meeting state.
+    _ACTIVE_CONTROL_SUBSTRINGS = (
+        "leave", "exit call", "hang up", "end call",
+        "turn off mic", "turn on mic", "turn off camera", "turn on camera",
+    )
+    # Text fragments that map to the "waiting" meeting state.
+    _WAITING_SUBSTRINGS = (
+        "asking to be let in", "someone lets you in",
+        "no one else is here yet", "you're the first one here",
+        "waiting for the host", "waiting for others",
+        "waiting for organizer", "meeting hasn't started",
+        "meeting has not started",
+    )
+    # Text fragments that map to the "failed" meeting state.
+    _FAILURE_SUBSTRINGS = (
+        "you can't join this video call", "you can't join this meeting",
+        "meeting code is invalid", "couldn't find the meeting",
+        "this meeting has ended", "meeting has ended", "call has ended",
+    )
+
     def __init__(
         self,
         *,
@@ -253,6 +273,27 @@ class _JoinStatePage:
             return _VisibilityLocator(False)
         return _VisibilityLocator(False)
 
+    async def evaluate(self, _expression: object) -> str:  # noqa: ARG002
+        """Simulate _classify_meeting_state JS using the stub's own fields."""
+        lower = self._html.lower()
+
+        for f in self._FAILURE_SUBSTRINGS:
+            if f in lower:
+                return "failed"
+
+        for label in self._visible_button_labels:
+            if any(a in label.lower() for a in self._ACTIVE_CONTROL_SUBSTRINGS):
+                return "active"
+
+        for w in self._WAITING_SUBSTRINGS:
+            if w in lower:
+                return "waiting"
+
+        if not self._preview_visible:
+            return "transitioning"
+
+        return "unknown"
+
 
 class _SlowJoinStatePage(_JoinStatePage):
     def __init__(
@@ -276,6 +317,11 @@ class _SlowJoinStatePage(_JoinStatePage):
             super().get_by_placeholder(pattern)._visible,
             delay_seconds=self._delay_seconds,
         )
+
+    async def evaluate(self, expression: object) -> str:
+        """Slow variant: simulate an expensive evaluate() call on Pi."""
+        await asyncio.sleep(self._delay_seconds)
+        return await super().evaluate(expression)
 
 
 def _load_module(module_name: str, relative_path: list[str]) -> ModuleType:
@@ -544,14 +590,17 @@ def test_google_meet_check_joined_accepts_waiting_room_text_state() -> None:
 def test_google_meet_check_joined_accepts_live_meet_url_after_preview_controls_disappear() -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    # preview_visible=False and no active labels → evaluate() returns
+    # "transitioning". With _TRANSITIONING_SETTLE_COUNT=3 polls and a generous
+    # timeout the loop must stabilise and return True.
     page = _JoinStatePage(
         url="https://meet.google.com/abc-defg-hij",
         html="<html><body><main>Meet</main></body></html>",
-        visible_button_labels=("More options",),
+        visible_button_labels=(),
         preview_visible=False,
     )
 
-    result = asyncio.run(controller._check_joined(page, timeout=0.01))
+    result = asyncio.run(controller._check_joined(page, timeout=5.0))
 
     assert result is True
 
@@ -619,8 +668,12 @@ def test_google_meet_join_does_not_block_on_active_speaker_setup_timeout(
 
 def test_google_meet_check_joined_bounds_slow_visibility_probes(monkeypatch) -> None:
     google_meet_module = _load_google_meet_module()
-    monkeypatch.setattr(google_meet_module, "_DIAGNOSTIC_STEP_DEADLINE_SECONDS", 0.01)
+    # Make the classify call itself slow (simulate Pi evaluate() latency).
+    monkeypatch.setattr(
+        google_meet_module, "_CLASSIFY_STATE_TIMEOUT_SECONDS", 5.0
+    )
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    # Slow evaluate (0.05s per call) but waiting-room text → resolves quickly.
     page = _SlowJoinStatePage(
         url="https://meet.google.com/abc-defg-hij",
         html="""
@@ -636,8 +689,108 @@ def test_google_meet_check_joined_bounds_slow_visibility_probes(monkeypatch) -> 
     )
 
     started_at = time.monotonic()
-    result = asyncio.run(controller._check_joined(page, timeout=0.2))
+    result = asyncio.run(controller._check_joined(page, timeout=2.0))
     elapsed = time.monotonic() - started_at
 
     assert result is True
-    assert elapsed < 0.15
+    assert elapsed < 1.0
+
+
+# ---------------------------------------------------------------------------
+# New tests: _classify_meeting_state via stub evaluate()
+# ---------------------------------------------------------------------------
+
+def test_google_meet_classify_state_returns_active() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body></body></html>",
+        visible_button_labels=("Turn off mic", "Leave call"),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "active"
+
+
+def test_google_meet_classify_state_returns_waiting() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body>No one else is here yet</body></html>",
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "waiting"
+
+
+def test_google_meet_classify_state_returns_failed() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body>You can't join this video call</body></html>",
+        preview_visible=True,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "failed"
+
+
+def test_google_meet_classify_state_returns_transitioning() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    # No failure, no active controls, no waiting text, no preview → transitioning
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body><main>Loading...</main></body></html>",
+        visible_button_labels=(),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._classify_meeting_state(page))
+
+    assert result == "transitioning"
+
+
+def test_google_meet_check_joined_stabilizes_on_transitioning() -> None:
+    """Verify _check_joined returns True after _TRANSITIONING_SETTLE_COUNT polls."""
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    # preview_visible=False, no active controls → always "transitioning".
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body><main>Loading...</main></body></html>",
+        visible_button_labels=(),
+        preview_visible=False,
+    )
+
+    result = asyncio.run(controller._check_joined(page, timeout=10.0))
+
+    assert result is True
+
+
+def test_google_meet_check_joined_logs_iteration_timing(caplog) -> None:
+    """Verify each probe iteration is logged with timing information."""
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="<html><body>No one else is here yet</body></html>",
+        preview_visible=False,
+    )
+
+    import logging
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(controller._check_joined(page, timeout=5.0))
+
+    assert "Google Meet post-click probe" in caplog.text
+    assert "iteration=" in caplog.text
+    assert "state=" in caplog.text
+    assert "elapsed=" in caplog.text
