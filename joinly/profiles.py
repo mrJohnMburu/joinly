@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -12,6 +12,7 @@ class DeploymentProfile:
     name: str
     description: str
     settings: dict[str, Any]
+    option_defaults: dict[str, Any] = field(default_factory=dict)
     assets: tuple[str, ...] = ()
 
 
@@ -25,6 +26,7 @@ _PROFILES: dict[str, DeploymentProfile] = {
             "resource-constrained hosts such as a Raspberry Pi."
         ),
         settings={
+            "name": "OpenClaw",
             "vad": "webrtc",
             "stt": "deepgram",
             "tts": "deepgram",
@@ -41,6 +43,7 @@ _PROFILES: dict[str, DeploymentProfile] = {
                 ),
             },
         },
+        option_defaults={"prompt_style": "dyadic"},
         assets=("playwright",),
     ),
 }
@@ -85,6 +88,20 @@ def apply_profile_defaults(
         merged[key] = deepcopy(value)
 
     return merged
+
+
+def apply_profile_default_value(
+    key: str,
+    value: Any,  # noqa: ANN401
+    profile_name: str | None,
+    parameter_source: str | None = None,
+) -> Any:  # noqa: ANN401
+    """Apply a single profile default when the user did not override it."""
+    if profile_name is None or parameter_source in _PROFILE_OVERRIDE_BLOCKLIST:
+        return deepcopy(value)
+
+    profile_value = get_profile(profile_name).option_defaults.get(key, value)
+    return deepcopy(profile_value)
 
 
 def get_profile_assets(profile_name: str | None) -> tuple[str, ...]:

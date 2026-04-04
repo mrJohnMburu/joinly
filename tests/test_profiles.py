@@ -5,6 +5,8 @@ def test_openclaw_pi_profile_uses_remote_audio_defaults() -> None:
     profile = get_profile("openclaw-pi")
 
     assert profile.name == "openclaw-pi"
+    assert profile.settings["name"] == "OpenClaw"
+    assert profile.option_defaults["prompt_style"] == "dyadic"
     assert profile.settings["vad"] == "webrtc"
     assert profile.settings["stt"] == "deepgram"
     assert profile.settings["tts"] == "deepgram"

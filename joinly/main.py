@@ -8,7 +8,11 @@ from urllib.parse import urlparse
 import click
 from dotenv import load_dotenv
 
-from joinly.profiles import apply_profile_defaults, profile_names
+from joinly.profiles import (
+    apply_profile_default_value,
+    apply_profile_defaults,
+    profile_names,
+)
 from joinly.server import mcp
 from joinly.settings import Settings, set_settings
 from joinly.utils.logging import configure_logging
@@ -353,6 +357,14 @@ def cli(  # noqa: PLR0913
             )
             for key in cli_settings
         },
+    )
+    prompt_style = apply_profile_default_value(
+        "prompt_style",
+        prompt_style,
+        deployment_profile,
+        ctx.get_parameter_source("prompt_style").name
+        if ctx.get_parameter_source("prompt_style") is not None
+        else None,
     )
 
     if cli_settings.get("meeting_provider") == "browser" and vnc_server:
