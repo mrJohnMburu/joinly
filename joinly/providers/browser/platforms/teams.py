@@ -13,6 +13,24 @@ from joinly.types import MeetingChatHistory, MeetingChatMessage, MeetingParticip
 
 logger = logging.getLogger(__name__)
 
+_STANDARD_TEAMS_NAME_FIELD_SELECTOR = (
+    'input[placeholder*="name" i], '
+    'input[aria-label*="name" i], '
+    'input[placeholder*="your name" i], '
+    'input[aria-label*="your name" i]'
+)
+_STANDARD_TEAMS_JOIN_BROWSER_PATTERNS = (
+    re.compile(r"continue.*browser", re.IGNORECASE),
+    re.compile(r"join.*browser", re.IGNORECASE),
+    re.compile(r"join on the web", re.IGNORECASE),
+    re.compile(r"continue on this browser", re.IGNORECASE),
+)
+_STANDARD_TEAMS_JOIN_PATTERNS = (
+    re.compile(r"join now", re.IGNORECASE),
+    re.compile(r"join meeting", re.IGNORECASE),
+    re.compile(r"^join$", re.IGNORECASE),
+)
+
 
 class TeamsBrowserPlatformController(BaseBrowserPlatformController):
     """Controller for managing Teams browser meetings."""
@@ -78,11 +96,16 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
         dismiss_dialog = asyncio.create_task(_dismiss_dialog(page))
 
         try:
-            name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
-            await name_field.fill(name, timeout=20000)
+            await self._click_first_visible_button(
+                page, _STANDARD_TEAMS_JOIN_BROWSER_PATTERNS
+            )
 
-            join_btn = page.get_by_role(
-                "button", name=re.compile(r"join", re.IGNORECASE)
+            name_field = await self._wait_for_standard_name_field(page)
+            await name_field.fill(name, timeout=10000)
+
+            join_btn = await self._wait_for_first_visible_button(
+                page,
+                _STANDARD_TEAMS_JOIN_PATTERNS,
             )
             await join_btn.click(timeout=10000)
 
@@ -136,6 +159,63 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
             for task in [dismiss_dialog, join_browser]:
                 if not task.done():
                     task.cancel()
+
+    async def _wait_for_standard_name_field(
+        self,
+        page: Page,
+        timeout_ms: int = 40000,
+    ) -> Any:
+        """Wait for the Teams guest name field across old and new web flows."""
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+        placeholder_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
+        selector_field = page.locator(_STANDARD_TEAMS_NAME_FIELD_SELECTOR).first
+
+        while asyncio.get_running_loop().time() < deadline:
+            for locator in (placeholder_field, selector_field):
+                with contextlib.suppress(Exception):
+                    if await locator.is_visible():
+                        return locator
+
+            await self._click_first_visible_button(
+                page, _STANDARD_TEAMS_JOIN_BROWSER_PATTERNS
+            )
+            await page.wait_for_timeout(500)
+
+        msg = "Teams guest name field did not appear."
+        raise PlaywrightTimeoutError(msg)
+
+    async def _wait_for_first_visible_button(
+        self,
+        page: Page,
+        patterns: tuple[re.Pattern[str], ...],
+        timeout_ms: int = 20000,
+    ) -> Any:
+        """Return the first visible button matching any supplied label pattern."""
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+        while asyncio.get_running_loop().time() < deadline:
+            for pattern in patterns:
+                locator = page.get_by_role("button", name=pattern).first
+                with contextlib.suppress(Exception):
+                    if await locator.is_visible():
+                        return locator
+            await page.wait_for_timeout(500)
+
+        msg = "Teams join button not found or not visible."
+        raise PlaywrightTimeoutError(msg)
+
+    async def _click_first_visible_button(
+        self,
+        page: Page,
+        patterns: tuple[re.Pattern[str], ...],
+    ) -> bool:
+        """Click the first currently visible button matching the patterns."""
+        for pattern in patterns:
+            locator = page.get_by_role("button", name=pattern).first
+            with contextlib.suppress(Exception):
+                if await locator.is_visible():
+                    await locator.click(timeout=1000)
+                    return True
+        return False
 
     async def leave(self, page: Page) -> None:
         """Leave the Teams meeting.
