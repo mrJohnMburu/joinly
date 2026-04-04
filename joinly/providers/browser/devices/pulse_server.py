@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import tempfile
 from pathlib import Path
@@ -58,11 +59,12 @@ class PulseServer(PulseModuleManager):
         )
 
         try:
-            await asyncio.wait_for(_wait_for_server(self.socket_path), timeout=5)
+            await asyncio.wait_for(_wait_for_server(self.socket_path), timeout=30)
         except TimeoutError as e:
-            msg = "PulseAudio server did not start in time"
+            msg = "PulseAudio server did not start in time. Check CPU/IO contention on Pi."
             logger.error(msg)  # noqa: TRY400
-            self._proc.kill()
+            with contextlib.suppress(ProcessLookupError):
+                self._proc.kill()
             await self._proc.wait()
             self._dir.cleanup()
             raise RuntimeError(msg) from e
@@ -94,6 +96,41 @@ class PulseServer(PulseModuleManager):
             self._dir.cleanup()
             logger.debug("Temporary directory removed: %s", self._dir.name)
             self._dir = None
+
+
+class SystemPulseServer:
+    """A no-op pulse server wrapper that reuses the existing session server."""
+
+    def __init__(
+        self,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self._env: dict[str, str] = env if env is not None else {}
+
+    async def __aenter__(self) -> Self:
+        """Verify that a session Pulse/PipeWire server is reachable."""
+        logger.debug("Using existing PulseAudio/PipeWire server")
+        proc = await asyncio.create_subprocess_exec(
+            "/usr/bin/pactl",
+            "info",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._env,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            msg = (
+                "System PulseAudio/PipeWire server is not available. "
+                f"pactl info failed: {stderr.decode().strip() or stdout.decode().strip()}"
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        """Leave the existing session server running."""
+        logger.debug("Leaving existing PulseAudio/PipeWire server running")
 
 
 async def _wait_for_server(path: Path) -> None:

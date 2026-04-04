@@ -21,6 +21,22 @@ class _StubService:
         return None
 
 
+class _StubPulseServer(_StubService):
+    instances: list["_StubPulseServer"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        type(self).instances.append(self)
+
+
+class _StubSystemPulseServer(_StubService):
+    instances: list["_StubSystemPulseServer"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        type(self).instances.append(self)
+
+
 class _StubPage:
     def __init__(self) -> None:
         self.closed = False
@@ -185,7 +201,8 @@ def _load_meeting_provider_module(monkeypatch) -> ModuleType:
     camera_feed_module = ModuleType("joinly.providers.browser.camera_feed")
     camera_feed_module.CameraFeed = _StubCameraFeed
     pulse_module = ModuleType("joinly.providers.browser.devices.pulse_server")
-    pulse_module.PulseServer = _StubService
+    pulse_module.PulseServer = _StubPulseServer
+    pulse_module.SystemPulseServer = _StubSystemPulseServer
     display_module = ModuleType("joinly.providers.browser.devices.virtual_display")
     display_module.VirtualDisplay = _StubService
     mic_module = ModuleType("joinly.providers.browser.devices.virtual_microphone")
@@ -271,6 +288,8 @@ def _reset_stubs() -> None:
     _StubGoogleMeetController.instances.clear()
     _StubTeamsController.instances.clear()
     _StubZoomController.instances.clear()
+    _StubPulseServer.instances.clear()
+    _StubSystemPulseServer.instances.clear()
 
 
 def test_audio_only_provider_skips_camera_feed_and_uses_microphone_writer(
@@ -331,6 +350,24 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
     assert _StubGoogleMeetController.instances[0].debug_artifact_dir == (
         "/tmp/joinly-google-meet-debug"
     )
+
+
+def test_provider_can_reuse_system_pulse_server(monkeypatch) -> None:
+    _reset_stubs()
+    meeting_provider_module = _load_meeting_provider_module(monkeypatch)
+    provider = meeting_provider_module.BrowserMeetingProvider(
+        audio_only=True,
+        use_system_pulse_server=True,
+    )
+
+    async def scenario() -> None:
+        await provider.join("https://meet.google.com/test-call", "OpenClaw")
+        await provider.leave()
+
+    asyncio.run(scenario())
+
+    assert len(_StubPulseServer.instances) == 0
+    assert len(_StubSystemPulseServer.instances) == 1
 
 
 def test_audio_only_provider_rejects_video_features(monkeypatch) -> None:
