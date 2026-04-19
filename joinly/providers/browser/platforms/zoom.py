@@ -84,7 +84,15 @@ class ZoomBrowserPlatformController(BaseBrowserPlatformController):
                     raise ValueError(msg)
 
             join_btn = page.locator("button", has_text="join").first
-            await join_btn.click(timeout=1000)
+
+            # Dismiss any React modal overlay (camera/mic permission popup)
+            with contextlib.suppress(Exception):
+                modal_overlay = page.locator(".ReactModal__Overlay")
+                if await modal_overlay.is_visible(timeout=2000):
+                    await modal_overlay.evaluate("el => el.remove()")
+                    await page.wait_for_timeout(500)
+
+            await join_btn.click(timeout=5000)
 
             await page.wait_for_timeout(2000)
             if await join_btn.is_visible():
@@ -307,7 +315,7 @@ class ZoomBrowserPlatformController(BaseBrowserPlatformController):
         await stop_btn.click(timeout=2000)
         await page.wait_for_timeout(500)
 
-    async def _check_joined(self, page: Page, timeout: float = 10) -> bool:  # noqa: ASYNC109
+    async def _check_joined(self, page: Page, timeout: float = 30) -> bool:  # noqa: ASYNC109
         """Check if the Zoom meeting has been joined successfully.
 
         Args:
@@ -317,10 +325,23 @@ class ZoomBrowserPlatformController(BaseBrowserPlatformController):
         Returns:
             bool: True if joined, False otherwise.
         """
+        # Wait a bit for Zoom to fully load after clicking join
+        await page.wait_for_timeout(3000)
+
+        # Take a screenshot for debugging
+        try:
+            await page.screenshot(path="/tmp/zoom-join-check.png")
+            logger.debug("Screenshot saved to /tmp/zoom-join-check.png")
+        except Exception:
+            pass
+
         locators = [
             page.locator("span >> text=/joining/i"),
             page.locator("span >> text=/we've let them know you're here/i"),
             page.get_by_role("button", name=re.compile(r"leave", re.IGNORECASE)),
+            page.locator("button", has_text=re.compile(r"unmute|mute", re.IGNORECASE)),
+            page.locator(".video-avatar-container"),
+            page.locator("[data-testid='participant-item']"),
         ]
 
         tasks = [

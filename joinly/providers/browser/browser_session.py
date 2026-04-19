@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import logging
 import os
@@ -12,6 +11,12 @@ from playwright.async_api import BrowserContext, Page, Playwright, async_playwri
 from joinly.utils.logging import LOGGING_TRACE
 
 logger = logging.getLogger(__name__)
+
+_PROFILE_LOCK_ERROR_SNIPPETS = (
+    "Failed to create a ProcessSingleton",
+    "Failed to create ",
+    "SingletonLock",
+)
 
 
 class BrowserSession:
@@ -75,9 +80,41 @@ class BrowserSession:
             self._profile_path = self._persistent_profile_dir
             return self._persistent_profile_dir
 
+        return self._create_temporary_profile_dir()
+
+    def _create_temporary_profile_dir(self) -> Path:
         self._profile_dir = tempfile.TemporaryDirectory(prefix="pw-profile_")
         self._profile_path = Path(self._profile_dir.name)
         return self._profile_path
+
+    @staticmethod
+    def _is_profile_lock_error(exc: Exception) -> bool:
+        message = str(exc)
+        return all(snippet in message for snippet in _PROFILE_LOCK_ERROR_SNIPPETS)
+
+    async def _launch_context(self, profile_dir: Path) -> BrowserContext:
+        return await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            executable_path=str(self._get_browser_executable_path()),
+            headless=False,
+            chromium_sandbox=False,
+            ignore_default_args=self._build_ignore_default_args(),
+            args=self._build_launch_args(),
+            env=self._env,
+        )
+
+    def _build_launch_args(self) -> list[str]:
+        chromium_args = self._build_chromium_args()
+        if self._net_log_path is not None:
+            self._net_log_path.parent.mkdir(parents=True, exist_ok=True)
+            chromium_args.extend(
+                [
+                    f"--log-net-log={self._net_log_path}",
+                    "--net-log-capture-mode=Everything",
+                ]
+            )
+            logger.debug("Chromium net log path: %s", self._net_log_path)
+        return chromium_args
 
     async def __aenter__(self) -> Self:
         """Start and connect to the Playwright browser."""
@@ -92,27 +129,24 @@ class BrowserSession:
 
         profile_dir = self._get_profile_dir()
         logger.debug("Profile directory ready at: %s", profile_dir)
-        chromium_args = self._build_chromium_args()
-        if self._net_log_path is not None:
-            self._net_log_path.parent.mkdir(parents=True, exist_ok=True)
-            chromium_args.extend(
-                [
-                    f"--log-net-log={self._net_log_path}",
-                    "--net-log-capture-mode=Everything",
-                ]
-            )
-            logger.debug("Chromium net log path: %s", self._net_log_path)
-
         logger.debug("Launching Chromium browser context.")
-        self._pw_context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            executable_path=str(bin_path),
-            headless=False,
-            chromium_sandbox=False,
-            ignore_default_args=self._build_ignore_default_args(),
-            args=chromium_args,
-            env=self._env,
-        )
+        try:
+            self._pw_context = await self._launch_context(profile_dir)
+        except Exception as exc:
+            if (
+                self._persistent_profile_dir is None
+                or not self._is_profile_lock_error(exc)
+            ):
+                raise
+            logger.warning(
+                "Persistent Chromium profile is locked; retrying with an isolated "
+                "temporary profile: %s",
+                self._persistent_profile_dir,
+            )
+            profile_dir = self._create_temporary_profile_dir()
+            logger.debug("Fallback profile directory ready at: %s", profile_dir)
+            self._pw_context = await self._launch_context(profile_dir)
+        await self._grant_media_permissions()
         self._pw_browser = self._pw_context.browser
         self._default_page = self._pw_context.pages[0] if self._pw_context.pages else None
 
@@ -127,7 +161,7 @@ class BrowserSession:
             "WebRtcAutomaticGainControl",
         ]
         chromium_args = [
-            "--use-fake-ui-for-media-stream",
+            # "--use-fake-ui-for-media-stream",  # removed: causes Teams mic to be greyed out
             "--alsa-output-device=pulse",
             f"--alsa-input-device={self._env.get('PULSE_SOURCE')}",
             "--autoplay-policy=no-user-gesture-required",
@@ -139,7 +173,6 @@ class BrowserSession:
             "--disable-focus-on-load",
             f"--window-size={self._window_size[0]},{self._window_size[1]}",
             "--lang=en-US",
-            "--test-type",
             "--no-sandbox",  # required for docker
             "--disable-dev-shm-usage",
             "--disable-gpu-sandbox",
@@ -151,7 +184,7 @@ class BrowserSession:
             # encrypt cookies via gnome-keyring/D-Bus secret service at page load time.
             # A locked keyring (e.g. fresh boot/login) blocks Chromium here indefinitely.
             "--password-store=basic",
-            "--use-mock-keychain",
+            "--use-mock-keyring",
             "--disable-backgrounding-occluded-windows",
         ]
         if self._software_rendering:
@@ -169,6 +202,20 @@ class BrowserSession:
 
         chromium_args.append(f"--disable-features={','.join(disable_features)}")
         return chromium_args
+
+    async def _grant_media_permissions(self) -> None:
+        """Pre-grant browser media permissions for meeting providers.
+
+        Fresh Chromium profiles can surface first-run microphone/camera prompts
+        that block Meet's preview join button. Granting permissions up front keeps
+        the join flow profile-independent.
+        """
+        if self._pw_context is None:
+            return
+
+        with contextlib.suppress(Exception):
+            await self._pw_context.grant_permissions(["microphone", "camera"])
+            logger.debug("Granted browser media permissions for the session.")
 
     def _build_ignore_default_args(self) -> list[str]:
         ignored = ["--mute-audio"]

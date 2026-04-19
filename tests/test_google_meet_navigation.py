@@ -15,23 +15,36 @@ class _StubPlaywrightTimeoutError(Exception):
 
 
 class _StubLocator:
-    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        visible: bool = True,
+        enabled: bool = True,
+        on_click: Callable[[], None] | None = None,
+    ) -> None:
         self.fill_calls: list[tuple[str, int | None]] = []
         self.click_calls: list[dict[str, object]] = []
         self.visible = visible
         self.enabled = enabled
+        self._on_click = on_click
 
     async def fill(self, value: str, timeout: int | None = None) -> None:
         self.fill_calls.append((value, timeout))
 
     async def click(self, timeout: int | None = None, **kwargs: object) -> None:
         self.click_calls.append({"timeout": timeout, **kwargs})
+        if self._on_click is not None:
+            self._on_click()
 
     async def is_visible(self) -> bool:
         return self.visible
 
     async def is_enabled(self) -> bool:
         return self.enabled
+
+    def get_by_role(self, _role: str, *, name: object = None) -> "_StubLocatorChain":
+        del name
+        return _StubLocatorChain(self)
 
 
 class _TimeoutFillLocator(_StubLocator):
@@ -52,20 +65,48 @@ class _TimeoutThenSuccessClickLocator(_StubLocator):
             raise _StubPlaywrightTimeoutError("click timed out")
 
 
+class _StubLocatorChain:
+    """Wraps a _StubLocator to support chained .first access."""
+
+    def __init__(self, locator: "_StubLocator") -> None:
+        self._locator = locator
+
+    @property
+    def first(self) -> "_StubLocator":
+        return self._locator
+
+    def get_by_role(self, role: str, *, name: object = None) -> "_StubLocatorChain":
+        return self._locator.get_by_role(role, name=name)
+
+
 class _StubPage:
     def __init__(self) -> None:
         self.goto_calls: list[tuple[str, str, int]] = []
         self.name_field = _StubLocator()
         self.join_button = _StubLocator()
+        self.permission_prompt = _StubLocator(visible=False)
+        self.dialog_action = _StubLocator(visible=False)
+        self.mouse = None  # _wake_meeting_ui checks for mouse attribute
+        self.viewport_size: dict | None = None
 
     async def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
         self.goto_calls.append((url, wait_until, timeout))
 
-    def get_by_placeholder(self, _pattern: object) -> _StubLocator:
+    def get_by_text(self, _text: str, *, exact: bool = False) -> _StubLocator: # noqa: ARG002
         return self.name_field
 
-    def get_by_role(self, _role: str, *, name: object) -> _StubLocator:
+    def get_by_role(self, role: str, *, name: object = None) -> _StubLocator:
+        if role == "textbox":
+            return _StubLocatorChain(self.name_field)
         return self.join_button
+
+    def locator(self, _selector: str) -> "_StubLocatorChain":
+        """Return a chain whose .first resolves to a stub locator."""
+        if _selector == "usermedia[type='microphone']":
+            return _StubLocatorChain(self.permission_prompt)
+        if _selector == "div[role='dialog'] [data-mdc-dialog-action]":
+            return _StubLocatorChain(self.dialog_action)
+        return _StubLocatorChain(self.name_field)
 
     async def wait_for_timeout(self, timeout: int) -> None:  # noqa: ARG002
         await asyncio.sleep(0)
@@ -82,6 +123,45 @@ class _EnableAfterWaitPage(_StubPage):
         if self._wait_calls >= 1:
             self.join_button.enabled = True
         await asyncio.sleep(0)
+
+
+class _PermissionPromptPage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.join_button.enabled = False
+        self.permission_prompt = _StubLocator(
+            visible=True,
+            on_click=self._enable_join_button,
+        )
+
+    def _enable_join_button(self) -> None:
+        self.join_button.enabled = True
+
+
+class _DialogPromptPage(_StubPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.join_button.enabled = False
+        self.dialog_action.visible = False
+        self.dialog_button = _StubLocator(
+            visible=True,
+            on_click=self._enable_join_button,
+        )
+
+    def locator(self, _selector: str) -> "_StubLocatorChain":
+        if _selector == "div[role='dialog']":
+            return _StubLocatorChain(self.dialog_button)
+        return super().locator(_selector)
+
+    def get_by_role(self, role: str, *, name: object = None) -> _StubLocator:
+        if role == "button" and name is not None:
+            label = getattr(name, "pattern", "")
+            if any(text in label.lower() for text in ("got it", "dismiss", "close")):
+                return self.dialog_button
+        return super().get_by_role(role, name=name)
+
+    def _enable_join_button(self) -> None:
+        self.join_button.enabled = True
 
 
 class _TimeoutPage(_StubPage):
@@ -651,7 +731,7 @@ def test_google_meet_join_uses_commit_navigation_and_waits_for_name_field(monkey
     assert page.goto_calls == [
         ("https://meet.google.com/test-call", "commit", 20000)
     ]
-    assert page.name_field.fill_calls == [("OpenClaw", 60000)]
+    assert page.name_field.fill_calls == [("OpenClaw", 10000)]
     assert page.join_button.click_calls == [{"timeout": 5000}]
 
 
@@ -688,6 +768,47 @@ def test_google_meet_join_skips_guest_name_when_signed_in_preview_has_no_name_fi
     assert page.join_button.click_calls == [{"timeout": 5000}]
 
 
+def test_google_meet_join_fills_name_field_when_heading_is_missing_but_textbox_exists(
+    monkeypatch,
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _StubPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    async def _wait_for_locator_visible(_locator: object, timeout: float = 0) -> bool:
+        del timeout
+        return False
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_wait_for_locator_visible",
+        _wait_for_locator_visible,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.name_field.fill_calls == [("OpenClaw", 10000)]
+    assert page.join_button.click_calls == [{"timeout": 5000}]
+
+
 def test_google_meet_join_waits_for_join_button_to_become_enabled(monkeypatch) -> None:
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
@@ -716,6 +837,38 @@ def test_google_meet_join_waits_for_join_button_to_become_enabled(monkeypatch) -
 
     assert page.join_button.click_calls == [{"timeout": 5000}]
     assert page._wait_calls == 1
+
+
+def test_google_meet_join_clears_microphone_prompt_before_clicking_join(
+    monkeypatch,
+) -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _PermissionPromptPage()
+
+    async def _check_joined(_page: object) -> bool:
+        return True
+
+    async def _setup_active_speaker_observer(_page: object) -> None:
+        return None
+
+    monkeypatch.setattr(controller, "_check_joined", _check_joined)
+    monkeypatch.setattr(
+        controller,
+        "_setup_active_speaker_observer",
+        _setup_active_speaker_observer,
+    )
+
+    asyncio.run(
+        controller.join(
+            page,
+            "https://meet.google.com/test-call",
+            name="OpenClaw",
+        )
+    )
+
+    assert page.permission_prompt.click_calls == [{"timeout": 1000}]
+    assert page.join_button.click_calls == [{"timeout": 5000}]
 
 
 def test_google_meet_join_retries_with_forced_click_when_primary_click_times_out(
@@ -876,7 +1029,7 @@ def test_google_meet_join_logs_name_field_timeout_context(caplog) -> None:
     assert page.goto_calls == [
         ("https://meet.google.com/test-call", "commit", 20000)
     ]
-    assert page.name_field.fill_calls == [("OpenClaw", 60000)]
+    assert page.name_field.fill_calls == [("OpenClaw", 10000)]
     assert page.screenshot_calls
     assert "Google Meet join step timed out" in caplog.text
     assert "step=name_field.fill" in caplog.text
@@ -1018,7 +1171,7 @@ def test_google_meet_join_reports_terminal_failure_after_post_click_check(
                 )
             )
 
-    assert page.name_field.fill_calls == [("OpenClaw", 60000)]
+    assert page.name_field.fill_calls == [("OpenClaw", 10000)]
     assert page.join_button.click_calls
     assert "post_click.access_denied" in caplog.text
 
@@ -1451,6 +1604,30 @@ def test_google_meet_check_joined_wakes_shell_active_ui_to_validate_controls() -
     google_meet_module = _load_google_meet_module()
     controller = google_meet_module.GoogleMeetBrowserPlatformController()
     page = _WakeableShellJoinStatePage()
+
+    result = asyncio.run(controller._check_joined(page, timeout=1.0))
+
+    assert result is True
+    assert page.mouse.move_calls
+
+
+def test_google_meet_check_joined_accepts_stable_shell_active_without_controls() -> None:
+    google_meet_module = _load_google_meet_module()
+    controller = google_meet_module.GoogleMeetBrowserPlatformController()
+    page = _JoinStatePage(
+        url="https://meet.google.com/abc-defg-hij",
+        html="""
+        <html>
+          <body>
+            <div data-in-call="true"></div>
+          </body>
+        </html>
+        """,
+        visible_button_labels=(),
+        preview_visible=False,
+    )
+    page.mouse = _StubMouse()
+    page.viewport_size = {"width": 1280, "height": 720}
 
     result = asyncio.run(controller._check_joined(page, timeout=1.0))
 

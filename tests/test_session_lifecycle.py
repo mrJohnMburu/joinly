@@ -43,6 +43,15 @@ class DeepgramSTT:
         type(self).instances.append(self)
 
 
+class WhisperSTT:
+    instances: list["WhisperSTT"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.audio_format = SimpleNamespace(byte_depth=2)
+        type(self).instances.append(self)
+
+
 class FakeTTS:
     instances: list["FakeTTS"] = []
 
@@ -149,6 +158,7 @@ class FakeSpeechController:
 def _reset_fakes() -> None:
     FakeVAD.instances.clear()
     DeepgramSTT.instances.clear()
+    WhisperSTT.instances.clear()
     FakeTTS.instances.clear()
     BrowserMeetingProvider.instances.clear()
     FakeTranscriptionController.instances.clear()
@@ -159,6 +169,18 @@ def _build_settings() -> Settings:
     return Settings.model_construct(
         vad=FakeVAD,
         stt=DeepgramSTT,
+        tts=FakeTTS,
+        meeting_provider=BrowserMeetingProvider,
+        transcription_controller=FakeTranscriptionController,
+        speech_controller=FakeSpeechController,
+    )
+
+
+def _build_whisper_settings() -> Settings:
+    return Settings.model_construct(
+        device="cpu",
+        vad=FakeVAD,
+        stt=WhisperSTT,
         tts=FakeTTS,
         meeting_provider=BrowserMeetingProvider,
         transcription_controller=FakeTranscriptionController,
@@ -240,6 +262,31 @@ def test_leave_meeting_rebuilds_runtime_for_the_next_meeting() -> None:
             assert BrowserMeetingProvider.instances[1].join_calls == [
                 ("https://meet.google.com/second-call", "OpenClaw", None)
             ]
+        finally:
+            await session_container.__aexit__()
+
+    asyncio.run(scenario())
+
+
+def test_session_container_tunes_cpu_whisper_for_single_worker_backpressure() -> None:
+    async def scenario() -> None:
+        _reset_fakes()
+        session_container = SessionContainer(settings=_build_whisper_settings())
+        meeting_session = await session_container.__aenter__()
+
+        try:
+            await meeting_session.join_meeting(
+                "https://meet.google.com/test-call",
+                "OpenClaw",
+            )
+
+            assert len(WhisperSTT.instances) == 1
+            assert WhisperSTT.instances[0].kwargs == {}
+            assert FakeTranscriptionController.instances[0].kwargs == {
+                "max_stt_tasks": 1,
+                "utterance_queue_size": 64,
+                "window_queue_size": 512,
+            }
         finally:
             await session_container.__aexit__()
 

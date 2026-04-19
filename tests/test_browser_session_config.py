@@ -68,6 +68,7 @@ class _FakeBrowserContext:
     def __init__(self, pages: list[_FakePage] | None = None) -> None:
         self.pages = list(pages or [])
         self.close_calls = 0
+        self.grant_permissions_calls: list[dict[str, object]] = []
 
     @property
     def browser(self) -> SimpleNamespace:
@@ -81,15 +82,28 @@ class _FakeBrowserContext:
     async def close(self) -> None:
         self.close_calls += 1
 
+    async def grant_permissions(
+        self, permissions: list[str], origin: str | None = None
+    ) -> None:
+        self.grant_permissions_calls.append(
+            {"permissions": permissions, "origin": origin}
+        )
+
 
 class _FakeChromium:
     def __init__(self, executable_path: str) -> None:
         self.executable_path = executable_path
         self.launch_calls: list[dict[str, object]] = []
         self.context = _FakeBrowserContext()
+        self.launch_side_effects: list[Exception | _FakeBrowserContext] = []
 
     async def launch_persistent_context(self, **kwargs: object) -> _FakeBrowserContext:
         self.launch_calls.append(kwargs)
+        if self.launch_side_effects:
+            result = self.launch_side_effects.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return self.context
 
 
@@ -146,6 +160,9 @@ def test_browser_session_uses_configured_executable_and_persistent_profile(
             assert "--window-size=1024,576" in launch_kwargs["args"]
             assert f"--log-net-log={net_log_path}" in launch_kwargs["args"]
             assert "--net-log-capture-mode=Everything" in launch_kwargs["args"]
+            assert fake_playwright.chromium.context.grant_permissions_calls == [
+                {"permissions": ["microphone", "camera"], "origin": None}
+            ]
             assert profile_dir.exists()
         finally:
             await session.__aexit__()
@@ -270,3 +287,54 @@ def test_browser_session_reuses_default_page_before_creating_new_pages(
             await session.__aexit__()
 
     asyncio.run(scenario())
+
+
+def test_browser_session_falls_back_when_persistent_profile_is_locked(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fake_playwright = _FakePlaywright("/playwright/chromium")
+    fake_playwright.chromium.launch_side_effects = [
+        RuntimeError(
+            "BrowserType.launch_persistent_context: Failed to create "
+            "/tmp/profile/SingletonLock: File exists (17)\n"
+            "Failed to create a ProcessSingleton for your profile directory."
+        ),
+        fake_playwright.chromium.context,
+    ]
+
+    monkeypatch.setattr(
+        browser_session_module,
+        "async_playwright",
+        lambda: _FakePlaywrightStarter(fake_playwright),
+    )
+
+    executable_path = tmp_path / "chromium"
+    executable_path.write_text("")
+    profile_dir = tmp_path / "persistent-profile"
+    session = BrowserSession(
+        executable_path=str(executable_path),
+        profile_dir=str(profile_dir),
+    )
+
+    fallback_profile_dir: Path | None = None
+
+    async def scenario() -> None:
+        nonlocal fallback_profile_dir
+        await session.__aenter__()
+        try:
+            assert len(fake_playwright.chromium.launch_calls) == 2
+            assert fake_playwright.chromium.launch_calls[0]["user_data_dir"] == str(
+                profile_dir
+            )
+            fallback_profile_dir = Path(
+                fake_playwright.chromium.launch_calls[1]["user_data_dir"]
+            )
+            assert fallback_profile_dir != profile_dir
+            assert fallback_profile_dir.exists()
+        finally:
+            await session.__aexit__()
+
+    asyncio.run(scenario())
+
+    assert fallback_profile_dir is not None
+    assert not fallback_profile_dir.exists()

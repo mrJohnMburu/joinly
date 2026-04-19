@@ -27,6 +27,7 @@ class DefaultTranscriptionController(TranscriptionController):
         utterance_tail_seconds: float = 0.6,
         no_speech_event_delay: float = 0.4,
         max_stt_tasks: int = 5,
+        utterance_queue_size: int = 32,
         window_queue_size: int = 100,
     ) -> None:
         """Initialize the TranscriptionController.
@@ -39,16 +40,22 @@ class DefaultTranscriptionController(TranscriptionController):
                 emitting a no-speech event (default is 0.4).
             max_stt_tasks (int): The maximum number of concurrent STT tasks
                 (default is 5).
+            utterance_queue_size (int): The maximum number of pending utterances
+                waiting for STT workers (default is 32).
             window_queue_size (int): The maximum size of the window queue
                 (default is 100).
         """
         self.utterance_tail_seconds = float(utterance_tail_seconds)
         self.no_speech_event_delay = float(no_speech_event_delay)
         self.max_stt_tasks = max_stt_tasks
+        self.utterance_queue_size = utterance_queue_size
         self.window_queue_size = window_queue_size
         self._vad_task: asyncio.Task | None = None
         self._window_queue: asyncio.Queue[SpeechWindow | None] | None = None
-        self._stt_tasks: set[asyncio.Task] = set()
+        self._utterance_queue: asyncio.Queue[
+            asyncio.Queue[SpeechWindow | None] | None
+        ] | None = None
+        self._stt_workers: list[asyncio.Task[None]] = []
         self._no_speech_event = asyncio.Event()
         self._clock: Clock | None = None
         self._transcript: Transcript | None = None
@@ -85,6 +92,11 @@ class DefaultTranscriptionController(TranscriptionController):
         self._clock = clock
         self._transcript = transcript
         self._event_bus = event_bus
+        self._utterance_queue = asyncio.Queue(maxsize=self.utterance_queue_size)
+        self._stt_workers = [
+            asyncio.create_task(self._stt_worker())
+            for _ in range(max(1, self.max_stt_tasks))
+        ]
         self._vad_task = asyncio.create_task(self._vad_worker())
 
     async def stop(self) -> None:
@@ -97,15 +109,21 @@ class DefaultTranscriptionController(TranscriptionController):
 
         self._no_speech_event.clear()
 
-        for task in list(self._stt_tasks):
+        if self._utterance_queue is not None:
+            for _ in self._stt_workers:
+                with contextlib.suppress(asyncio.QueueFull):
+                    self._utterance_queue.put_nowait(None)
+
+        for task in list(self._stt_workers):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._stt_tasks.clear()
+        self._stt_workers.clear()
 
         self._clock = None
         self._transcript = None
         self._event_bus = None
+        self._utterance_queue = None
         self._window_queue = None
 
     def _notify(self, event_type: EventType) -> None:
@@ -119,7 +137,7 @@ class DefaultTranscriptionController(TranscriptionController):
 
         self._event_bus.publish(event_type)
 
-    async def _vad_worker(self) -> None:  # noqa: C901, PLR0915
+    async def _vad_worker(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Process audio data for vad and start utterance stt."""
         self._window_queue = None
         last_speech: int | None = None
@@ -153,19 +171,23 @@ class DefaultTranscriptionController(TranscriptionController):
                 # utterance start
                 logger.debug("Utterance start: %.2fs", window.time_ns / 1e9)
                 utterance_start = window.time_ns
-                if len(self._stt_tasks) >= self.max_stt_tasks:
-                    logger.warning(
-                        "Maximum number of STT tasks reached (%d), dropping window",
-                        self.max_stt_tasks,
-                    )
-                    continue
+                if self._utterance_queue is None:
+                    msg = "Transcription utterance queue is not initialized"
+                    raise RuntimeError(msg)
 
                 self._window_queue = asyncio.Queue[SpeechWindow | None](
                     maxsize=self.window_queue_size
                 )
-                task = asyncio.create_task(self._stt_utterance(self._window_queue))
-                task.add_done_callback(lambda t: self._stt_tasks.discard(t))
-                self._stt_tasks.add(task)
+                try:
+                    self._utterance_queue.put_nowait(self._window_queue)
+                except asyncio.QueueFull:
+                    self._window_queue = None
+                    logger.warning(
+                        "Maximum number of pending utterances reached (%d), "
+                        "dropping utterance",
+                        self.utterance_queue_size,
+                    )
+                    continue
 
             if (
                 not window.is_speech
@@ -209,6 +231,18 @@ class DefaultTranscriptionController(TranscriptionController):
                             dropped_windows,
                         )
                     dropped_windows = 0
+
+    async def _stt_worker(self) -> None:
+        """Process queued utterances using a fixed STT worker pool."""
+        if self._utterance_queue is None:
+            msg = "Transcription utterance queue is not initialized"
+            raise RuntimeError(msg)
+
+        while True:
+            queue = await self._utterance_queue.get()
+            if queue is None:
+                return
+            await self._stt_utterance(queue)
 
     async def _stt_utterance(self, queue: asyncio.Queue[SpeechWindow | None]) -> None:
         """Process speech windows for transcription."""

@@ -88,6 +88,8 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
             url: The URL of the Teams meeting.
             name: The name of the participant.
         """
+        # Navigate directly to the meeting URL. Guest/browser flows rely on this
+        # route and may not expose a stable account home URL before join.
         await page.goto(url, wait_until="load", timeout=20000)
 
         async def _dismiss_dialog(page: Page) -> None:
@@ -96,17 +98,26 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
         dismiss_dialog = asyncio.create_task(_dismiss_dialog(page))
 
         try:
+            # Guest flow normally requires an explicit "Join on browser" click.
             await self._click_first_visible_button(
                 page, _STANDARD_TEAMS_JOIN_BROWSER_PATTERNS
             )
 
-            name_field = await self._wait_for_standard_name_field(page)
-            await name_field.fill(name, timeout=10000)
+            try:
+                name_field = await self._wait_for_standard_name_field(page)
+                await name_field.fill(name, timeout=10000)
+            except PlaywrightTimeoutError:
+                # Logged-in flows may skip the name field.
+                pass
 
             join_btn = await self._wait_for_first_visible_button(
                 page,
                 _STANDARD_TEAMS_JOIN_PATTERNS,
             )
+
+            # Ensure mic is enabled on the pre-join screen
+            await self._ensure_prejoin_mic_enabled(page)
+
             await join_btn.click(timeout=10000)
 
         finally:
@@ -131,6 +142,9 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
         # Government Teams may have redirects, use longer timeout
         await page.goto(url, wait_until="load", timeout=60000)
 
+        # Ensure we're logged in
+        await self._ensure_logged_in(page)
+
         async def _dismiss_dialog(page: Page) -> None:
             with contextlib.suppress(PlaywrightTimeoutError):
                 await page.click('div[role="dialog"] button', timeout=1000)
@@ -149,6 +163,9 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
                 'input[placeholder*="name" i], input[aria-label*="name" i]'
             ).first
             await name_field.fill(name, timeout=40000)
+
+            # Ensure mic is enabled on the pre-join screen
+            await self._ensure_prejoin_mic_enabled(page)
 
             join_btn = page.get_by_role(
                 "button", name=re.compile(r"join", re.IGNORECASE)
@@ -216,6 +233,140 @@ class TeamsBrowserPlatformController(BaseBrowserPlatformController):
                     await locator.click(timeout=1000)
                     return True
         return False
+
+    async def _ensure_logged_in(self, page: Page, timeout: int = 300) -> None:
+        """Check if logged into Teams. If not, navigate to login page and wait.
+
+        Visits teams.microsoft.com first. If redirected to login, pauses
+        for manual login via VNC. Only needs to happen once — Playwright
+        keeps the session cookies.
+        """
+        logger.info("Checking Teams login status...")
+        await page.goto("https://teams.microsoft.com", wait_until="load", timeout=20000)
+        await page.wait_for_timeout(3000)
+
+        # Check if we landed on a login page
+        login_indicators = [
+            page.locator('input[type="email"]'),
+            page.locator('input[name="loginfmt"]'),
+            page.locator('input[placeholder*="email" i]'),
+            page.locator('input[placeholder*="phone" i]'),
+        ]
+
+        needs_login = False
+        for locator in login_indicators:
+            try:
+                if await locator.is_visible(timeout=2000):
+                    needs_login = True
+                    break
+            except Exception:
+                continue
+
+        current_url = str(getattr(page, "url", "") or "")
+        if not needs_login:
+            # Also check URL — if we're on teams.microsoft.com without /login, we're good
+            if "login" not in current_url.lower() and "login.microsoftonline" not in current_url.lower():
+                logger.info("Already logged into Teams")
+                return
+
+        if not needs_login:
+            logger.info("No login form detected, assuming logged in")
+            return
+
+        logger.info(
+            "Microsoft login page detected. Waiting for manual login via VNC..."
+        )
+        logger.info("Connect to VNC at 192.168.1.195 to complete login")
+
+        # Wait for login to complete — look for Teams dashboard elements
+        deadline = asyncio.get_running_loop().time() + timeout
+        logged_in = False
+
+        while asyncio.get_running_loop().time() < deadline:
+            current_url = str(getattr(page, "url", "") or "")
+            # Check if redirected back to teams
+            if (
+                "teams.microsoft.com" in current_url
+                and "login.microsoftonline" not in current_url
+                and "login" not in current_url.lower()
+            ):
+                logged_in = True
+                break
+
+            # Check for login form to disappear
+            still_on_login = False
+            for locator in login_indicators:
+                try:
+                    if await locator.is_visible(timeout=500):
+                        still_on_login = True
+                        break
+                except Exception:
+                    continue
+
+            if not still_on_login:
+                await page.wait_for_timeout(3000)
+                logged_in = True
+                break
+
+            await page.wait_for_timeout(2000)
+
+        if logged_in:
+            logger.info("Login completed successfully")
+            await page.wait_for_timeout(2000)
+        else:
+            logger.warning(
+                "Login wait timed out after %ds, attempting to continue anyway",
+                timeout,
+            )
+
+    async def _ensure_prejoin_mic_enabled(self, page: Page) -> None:
+        """Ensure the microphone toggle is ON in the Teams pre-join screen.
+
+        Teams pre-join screen has mic/camera toggles. If mic is muted (off)
+        there, Teams keeps it greyed out inside the meeting. Click the toggle
+        if it appears to be in the muted state.
+        """
+        # Teams uses a toggle button with aria-label containing "microphone" or "mic"
+        mic_toggle = page.locator(
+            'button[data-tid="prejoin-toggle-mic"], '
+            'button[aria-label*="microphone" i], '
+            'button[aria-label*="mic" i], '
+            '[data-tid="toggle-mic"]'
+        ).first
+
+        try:
+            if not await mic_toggle.is_visible(timeout=3000):
+                logger.debug("Pre-join mic toggle not found, skipping")
+                return
+
+            # Check if the button indicates muted state
+            aria_label = (await mic_toggle.get_attribute("aria-label") or "").lower()
+            class_list = (await mic_toggle.get_attribute("class") or "")
+            title = (await mic_toggle.get_attribute("title") or "").lower()
+
+            # Click if any muted indicator is present
+            muted_indicators = ["muted", "turn on", "enable", "unmute"]
+            is_muted = any(
+                indicator in aria_label or indicator in title
+                for indicator in muted_indicators
+            )
+
+            # Also check for Teams' visual muted state class
+            if not is_muted:
+                is_muted = (
+                    "muted" in class_list
+                    or "off" in class_list
+                    or "disabled" in class_list
+                )
+
+            if is_muted:
+                logger.info("Pre-join mic appears muted, clicking to enable")
+                await mic_toggle.click(timeout=3000)
+                await page.wait_for_timeout(500)
+            else:
+                logger.debug("Pre-join mic appears enabled, not clicking")
+        except Exception:
+            logger.debug("Could not interact with pre-join mic toggle, continuing")
 
     async def leave(self, page: Page) -> None:
         """Leave the Teams meeting.

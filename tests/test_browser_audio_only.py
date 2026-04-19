@@ -37,6 +37,14 @@ class _StubSystemPulseServer(_StubService):
         type(self).instances.append(self)
 
 
+class _StubAutoPulseServer(_StubService):
+    instances: list["_StubAutoPulseServer"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        type(self).instances.append(self)
+
+
 class _StubPage:
     def __init__(self) -> None:
         self.closed = False
@@ -201,6 +209,7 @@ def _load_meeting_provider_module(monkeypatch) -> ModuleType:
     camera_feed_module = ModuleType("joinly.providers.browser.camera_feed")
     camera_feed_module.CameraFeed = _StubCameraFeed
     pulse_module = ModuleType("joinly.providers.browser.devices.pulse_server")
+    pulse_module.AutoPulseServer = _StubAutoPulseServer
     pulse_module.PulseServer = _StubPulseServer
     pulse_module.SystemPulseServer = _StubSystemPulseServer
     display_module = ModuleType("joinly.providers.browser.devices.virtual_display")
@@ -290,6 +299,7 @@ def _reset_stubs() -> None:
     _StubZoomController.instances.clear()
     _StubPulseServer.instances.clear()
     _StubSystemPulseServer.instances.clear()
+    _StubAutoPulseServer.instances.clear()
 
 
 def test_audio_only_provider_skips_camera_feed_and_uses_microphone_writer(
@@ -307,6 +317,7 @@ def test_audio_only_provider_skips_camera_feed_and_uses_microphone_writer(
     asyncio.run(scenario())
 
     assert _StubCameraFeed.instances == []
+    assert len(_StubAutoPulseServer.instances) == 1
     assert len(_StubGoogleMeetController.instances) == 1
     assert _StubGoogleMeetController.instances[0].join_calls == [
         ("https://meet.google.com/test-call", "OpenClaw", None)
@@ -350,6 +361,7 @@ def test_provider_passes_browser_diagnostics_config_to_session_and_google_meet(
     assert _StubGoogleMeetController.instances[0].debug_artifact_dir == (
         "/tmp/joinly-google-meet-debug"
     )
+    assert len(_StubAutoPulseServer.instances) == 1
 
 
 def test_provider_can_reuse_system_pulse_server(monkeypatch) -> None:
@@ -368,6 +380,7 @@ def test_provider_can_reuse_system_pulse_server(monkeypatch) -> None:
 
     assert len(_StubPulseServer.instances) == 0
     assert len(_StubSystemPulseServer.instances) == 1
+    assert len(_StubAutoPulseServer.instances) == 0
 
 
 def test_audio_only_provider_rejects_video_features(monkeypatch) -> None:

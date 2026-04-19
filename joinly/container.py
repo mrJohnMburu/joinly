@@ -92,6 +92,11 @@ class SessionContainer:
                 self._settings.vad_args,
                 stack=meeting_stack,
             )
+            stt_type = _resolve(
+                self._settings.stt,
+                base="joinly.services.stt",
+                suffix="STT",
+            )
             stt_extra_args = (
                 {
                     "finalize_silence": max(
@@ -105,14 +110,19 @@ class SessionContainer:
                         - 0.225,
                     )
                 }
-                if _resolve(
-                    self._settings.stt,
-                    base="joinly.services.stt",
-                    suffix="STT",
-                ).__name__
-                == "DeepgramSTT"
+                if stt_type.__name__ == "DeepgramSTT"
                 else {}
             )
+            transcription_controller_extra_args: dict[str, Any] = {}
+            if stt_type.__name__ == "WhisperSTT" and self._settings.device == "cpu":
+                # Local Whisper on Pi-class CPUs behaves better with a single
+                # transcription worker and queued utterances than with several
+                # overlapping streams contending for CPU time.
+                transcription_controller_extra_args = {
+                    "max_stt_tasks": 1,
+                    "utterance_queue_size": 64,
+                    "window_queue_size": 512,
+                }
             stt = await self._build(
                 self._settings.stt,
                 "joinly.services.stt",
@@ -153,7 +163,8 @@ class SessionContainer:
                 self._settings.transcription_controller,
                 "joinly.controllers.transcription",
                 "TranscriptionController",
-                self._settings.transcription_controller_args,
+                transcription_controller_extra_args
+                | self._settings.transcription_controller_args,
                 stack=meeting_stack,
             )
             speech_controller = await self._build(

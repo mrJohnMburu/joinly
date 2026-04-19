@@ -13,7 +13,11 @@ from joinly.core import AudioReader, AudioWriter, VideoReader
 from joinly.providers.base import BaseMeetingProvider
 from joinly.providers.browser.browser_session import BrowserSession
 from joinly.providers.browser.camera_feed import CameraFeed
-from joinly.providers.browser.devices.pulse_server import PulseServer, SystemPulseServer
+from joinly.providers.browser.devices.pulse_server import (
+    AutoPulseServer,
+    PulseServer,
+    SystemPulseServer,
+)
 from joinly.providers.browser.devices.virtual_display import VirtualDisplay
 from joinly.providers.browser.devices.virtual_microphone import VirtualMicrophone
 from joinly.providers.browser.devices.virtual_speaker import VirtualSpeaker
@@ -83,7 +87,7 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         browser_profile_dir: str | None = None,
         browser_net_log_path: str | None = None,
         browser_software_rendering: bool = False,
-        use_system_pulse_server: bool = False,
+        use_system_pulse_server: bool | None = None,
         google_meet_preflight_urls: tuple[str, ...] = (),
         google_meet_debug_artifact_dir: str | None = None,
         audio_only: bool = False,
@@ -109,7 +113,8 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
                 software rendering profile for Chromium.
             use_system_pulse_server: Whether to reuse an existing session
                 PulseAudio/PipeWire server instead of starting a private
-                PulseAudio daemon.
+                PulseAudio daemon. When omitted, Joinly auto-detects a host
+                session server and reuses it when available.
             google_meet_preflight_urls: Optional diagnostic URLs to probe before
                 navigating to the full Google Meet join URL.
             google_meet_debug_artifact_dir: Optional directory for Google Meet
@@ -123,11 +128,12 @@ class BrowserMeetingProvider(BaseMeetingProvider, VideoReader):
         self._google_meet_preflight_urls = tuple(google_meet_preflight_urls)
         self._google_meet_debug_artifact_dir = google_meet_debug_artifact_dir
         self._env = os.environ.copy()
-        self._pulse_server = (
-            SystemPulseServer(env=self._env)
-            if use_system_pulse_server
-            else PulseServer(env=self._env)
-        )
+        if use_system_pulse_server is None:
+            self._pulse_server = AutoPulseServer(env=self._env)
+        elif use_system_pulse_server:
+            self._pulse_server = SystemPulseServer(env=self._env)
+        else:
+            self._pulse_server = PulseServer(env=self._env)
         self._virtual_display = VirtualDisplay(
             env=self._env,
             size=display_size,

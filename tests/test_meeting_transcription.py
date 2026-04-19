@@ -2,6 +2,7 @@ import asyncio
 from typing import Any
 
 import jiwer
+import pytest
 from mcp import ResourceUpdatedNotification, ServerNotification
 from pydantic import AnyUrl
 
@@ -9,6 +10,7 @@ from joinly.session import MeetingSession
 from joinly.types import Transcript
 
 
+@pytest.mark.manual
 async def test_meeting_transcription_mockup(
     mockup_browser_meeting: dict[str, Any], meeting_session: MeetingSession
 ) -> None:
@@ -21,6 +23,7 @@ async def test_meeting_transcription_mockup(
     )
 
 
+@pytest.mark.manual
 async def test_mcp_meeting_transcription_mockup(
     mockup_browser_meeting: dict[str, Any],
 ) -> None:

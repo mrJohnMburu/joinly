@@ -32,8 +32,10 @@ _POST_CLICK_POLL_INTERVAL_MS = 500
 _CLASSIFY_STATE_TIMEOUT_SECONDS = 5.0
 _TRANSITIONING_SETTLE_COUNT = 3
 _ACTIVE_SPEAKER_SETUP_TIMEOUT_SECONDS = 3.0
-_JOIN_BUTTON_READY_TIMEOUT_SECONDS = 10.0
+_JOIN_BUTTON_READY_TIMEOUT_SECONDS = 30.0
 _JOIN_BUTTON_READY_POLL_INTERVAL_MS = 500
+_NAME_FIELD_SETTLE_MS = 2000  # time to let React UI hydrate before checking name field
+_NAME_FIELD_WAIT_S = 8.0     # how long to wait for the name field to appear
 _ACCESS_DENIED_MESSAGE = (
     "Google Meet denied access. The meeting may require the host to admit "
     "guests or a signed-in Google account."
@@ -81,10 +83,27 @@ _LEAVE_BUTTON_PATTERNS = (
     re.compile(r"end call", re.IGNORECASE),
 )
 _MUTE_BUTTON_PATTERNS = (
-    re.compile(r"^turn off mic(?:rophone)?", re.IGNORECASE),
+    re.compile(r"^turn off (?:your )?mic(?:rophone)?", re.IGNORECASE),
+    re.compile(r"^mute(?: microphone)?", re.IGNORECASE),
 )
 _UNMUTE_BUTTON_PATTERNS = (
-    re.compile(r"^turn on mic(?:rophone)?", re.IGNORECASE),
+    re.compile(r"^turn on (?:your )?mic(?:rophone)?", re.IGNORECASE),
+    re.compile(r"^unmute(?: microphone)?", re.IGNORECASE),
+)
+_PREVIEW_MIC_PROMPT_PATTERNS = (
+    re.compile(r"do you want people to hear you in the meeting", re.IGNORECASE),
+    re.compile(r"continue without microphone", re.IGNORECASE),
+)
+_NAME_TEXTBOX_PATTERNS = (
+    re.compile(r"(?:what'?s your )?name", re.IGNORECASE),
+    re.compile(r"your name", re.IGNORECASE),
+)
+_DIALOG_DISMISS_BUTTON_PATTERNS = (
+    re.compile(r"^got it$", re.IGNORECASE),
+    re.compile(r"^dismiss$", re.IGNORECASE),
+    re.compile(r"^close$", re.IGNORECASE),
+    re.compile(r"^not now$", re.IGNORECASE),
+    re.compile(r"continue without microphone", re.IGNORECASE),
 )
 _UI_WAKE_WAIT_MS = 250
 
@@ -155,11 +174,29 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         join_btn = page.get_by_role(
             "button", name=re.compile(r"^(?!.*other ways).*join.*$", re.IGNORECASE)
         )
-        name_field = page.get_by_placeholder(re.compile("name", re.IGNORECASE))
-        if await self._locator_is_visible(name_field):
-            logger.debug("Google Meet join: waiting for guest name field")
+
+        # The Meet preview UI renders asynchronously.  On the Pi, Chromium may
+        # commit navigation before React has mounted the name-field input, so a
+        # bare is_visible() check fires too early and misses the field.
+        # Strategy:
+        #   1. Wait a short settle window for the JS runtime to hydrate.
+        #   2. Poll for the "What's your name?" heading to appear, indicating a
+        #      guest session.
+        #   3. If found, locate the adjacent name input and fill it.
+        await page.wait_for_timeout(_NAME_FIELD_SETTLE_MS)
+
+        guest_heading = page.get_by_text("What's your name?", exact=True)
+        name_field_appeared = await self._wait_for_locator_visible(
+            guest_heading, timeout=_NAME_FIELD_WAIT_S
+        )
+        name_field = await self._find_name_field(page)
+        if name_field_appeared or name_field is not None:
+            if name_field is None:
+                msg = "Guest name field was expected but could not be located."
+                raise RuntimeError(msg)
+            logger.debug("Google Meet join: guest session detected — filling name")
             try:
-                await name_field.fill(name, timeout=60000)
+                await name_field.fill(name, timeout=10000)
             except PlaywrightTimeoutError:
                 await self._raise_if_access_denied(
                     page,
@@ -175,8 +212,9 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             logger.debug("Google Meet join: guest name entered")
         else:
             logger.debug(
-                "Google Meet join: guest name field not present; "
-                "continuing with signed-in preview"
+                "Google Meet join: no name field appeared after %.1fs settle; "
+                "assuming signed-in preview",
+                _NAME_FIELD_WAIT_S,
             )
 
         await self._capture_debug_snapshot(page, stage="pre_click")
@@ -257,6 +295,25 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             message=_ACCESS_DENIED_MESSAGE,
         )
         raise RuntimeError(_ACCESS_DENIED_MESSAGE)
+
+    async def _find_name_field(self, page: Page) -> Any | None:
+        """Return the guest-name textbox when Meet exposes one."""
+        selector_candidates = (
+            "input[aria-label='Your name']",
+            "input[placeholder='Your name']",
+            "input[aria-label*='name' i]",
+            "input[placeholder*='name' i]",
+        )
+        for selector in selector_candidates:
+            locator = page.locator(selector).first
+            if await self._locator_is_visible(locator):
+                return locator
+
+        for pattern in _NAME_TEXTBOX_PATTERNS:
+            locator = page.get_by_role("textbox", name=pattern).first
+            if await self._locator_is_visible(locator):
+                return locator
+        return None
 
     async def leave(self, page: Page) -> None:
         """Leave the Google Meet meeting.
@@ -397,9 +454,17 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         mute_btn = await self._find_visible_button(page, _MUTE_BUTTON_PATTERNS)
         if mute_btn is not None:
             await mute_btn.click(timeout=1000)
-        elif not await self._has_visible_button(page, _UNMUTE_BUTTON_PATTERNS):
-            msg = "Mute button not found or not visible."
-            raise RuntimeError(msg)
+            return
+
+        if await self._has_visible_button(page, _UNMUTE_BUTTON_PATTERNS):
+            return
+
+        # Fallback for UI variants where controls don't expose stable labels.
+        if await self._toggle_mic_with_shortcut(page):
+            return
+
+        msg = "Mute button not found or not visible."
+        raise RuntimeError(msg)
 
     async def unmute(self, page: Page) -> None:
         """Unmute the participant in the Google Meet meeting.
@@ -413,9 +478,31 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         unmute_btn = await self._find_visible_button(page, _UNMUTE_BUTTON_PATTERNS)
         if unmute_btn is not None:
             await unmute_btn.click(timeout=1000)
-        elif not await self._has_visible_button(page, _MUTE_BUTTON_PATTERNS):
-            msg = "Unmute button not found or not visible."
-            raise RuntimeError(msg)
+            return
+
+        if await self._has_visible_button(page, _MUTE_BUTTON_PATTERNS):
+            return
+
+        # Fallback for UI variants where controls don't expose stable labels.
+        if await self._toggle_mic_with_shortcut(page):
+            return
+
+        msg = "Unmute button not found or not visible."
+        raise RuntimeError(msg)
+
+    async def _toggle_mic_with_shortcut(self, page: Page) -> bool:
+        """Fallback mic toggle via keyboard shortcut (Ctrl+D / Cmd+D)."""
+        keyboard = getattr(page, "keyboard", None)
+        if keyboard is None:
+            return False
+
+        with contextlib.suppress(Exception):
+            await keyboard.press("Control+d")
+            await page.wait_for_timeout(300)
+            await self._wake_meeting_ui(page)
+            return True
+
+        return False
 
     async def share_screen(self, page: Page) -> None:
         """Start sharing screen in the Google Meet meeting.
@@ -540,24 +627,84 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         join_btn: Any,
         page: Page,
         *,
-        target_url: str,  # noqa: ARG002
+        target_url: str,
         timeout: float = _JOIN_BUTTON_READY_TIMEOUT_SECONDS,
     ) -> bool:
-        """Wait until the preview join button is both visible and enabled."""
+        """Wait until the preview join button is both visible and enabled.
+
+        Dismisses transient modals (permission warnings, tips) that might be
+        blocking the button's enablement.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            # Fast path: if the primary button is visible and enabled, we are ready.
             if await self._locator_is_visible(join_btn) and await self._locator_is_enabled(
                 join_btn
             ):
                 return True
 
+            if await self._resolve_preview_blockers(page):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await page.wait_for_timeout(min(500, int(remaining * 1000)))
+                continue
+
+            state = await self._classify_meeting_state(page)
+
+            # If button is enabled and we are in a 'ready' state, we are good.
+            if state == "preview":
+                if await self._locator_is_visible(
+                    join_btn
+                ) and await self._locator_is_enabled(join_btn):
+                    return True
+
+            # If we are blocked by a modal, try to dismiss it.
+            if state == "modal_visible":
+                logger.debug("Google Meet join: dismissing blocking modal/toast")
+                await self._resolve_preview_blockers(page)
+
+            # Log if we are explicitly stalled on a disabled button.
+            if state == "preview_disabled":
+                logger.debug("Google Meet join: waiting for join button to become enabled...")
+
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
+
             await page.wait_for_timeout(
                 min(_JOIN_BUTTON_READY_POLL_INTERVAL_MS, int(remaining * 1000))
             )
         return False
+
+    async def _resolve_preview_blockers(self, page: Page) -> bool:
+        """Try to clear Meet preview blockers that keep the join button disabled."""
+        mic_prompt = page.locator("usermedia[type='microphone']").first
+        if await self._click_locator_if_visible(mic_prompt, timeout=1000):
+            logger.debug(
+                "Google Meet join: clicked microphone permission control in preview"
+            )
+            return True
+
+        continue_without_mic = page.get_by_role(
+            "button",
+            name=re.compile(r"continue without microphone", re.IGNORECASE),
+        )
+        if await self._click_locator_if_visible(continue_without_mic, timeout=1000):
+            logger.debug(
+                "Google Meet join: continued past microphone prompt without mic"
+            )
+            return True
+
+        if await self._has_visible_text(page, _PREVIEW_MIC_PROMPT_PATTERNS):
+            await self._dismiss_dialog(page)
+            return True
+
+        before = await self._locator_is_visible(
+            page.locator("div[role='dialog'] [data-mdc-dialog-action]").first
+        )
+        await self._dismiss_dialog(page)
+        return before
 
     async def _classify_meeting_state(self, page: Page) -> str:
         """Classify the current Google Meet page state via a single JS call.
@@ -589,6 +736,13 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         const style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden';
     };
+    const isEnabled = (el) => {
+        if (!el) return false;
+        if (el.hasAttribute('disabled')) return false;
+        if (el.getAttribute('aria-disabled') === 'true') return false;
+        if (el.classList.contains('disabled')) return false;
+        return true;
+    };
 
     // --- Terminal failure ---
     const failures = [
@@ -616,11 +770,25 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         "meeting hasn't started",
         'meeting has not started',
         'still trying to get in',
+        'asking to join',
         'please wait until a meeting host brings you into the call',
     ];
     for (const w of waiting) {
         if (lower.includes(w)) return 'waiting';
     }
+
+    // --- Dismissible Modals/Toasts ---
+    const hasDismissible = [...document.querySelectorAll(
+        'button, [role="button"], [data-mdc-dialog-action]'
+    )].some(el => {
+        const text = (el.textContent || '').trim().toLowerCase();
+        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        return isVisible(el) && (
+            text === 'dismiss' || text === 'got it' ||
+            aria.includes('dismiss') || aria.includes('close')
+        );
+    });
+    if (hasDismissible) return 'modal_visible';
 
     // --- Prejoin preview UI ---
     const previewText = [
@@ -629,7 +797,15 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         'other ways to join',
     ];
     for (const p of previewText) {
-        if (lower.includes(p)) return 'preview';
+        if (lower.includes(p)) {
+             // Check if the primary join button is actually enabled yet
+             const joinBtn = [...document.querySelectorAll('button, [role="button"]')].find(el => {
+                 const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`;
+                 return isVisible(el) && /^(?!.*other ways).*join.*/i.test(label.trim());
+             });
+             if (joinBtn && !isEnabled(joinBtn)) return 'preview_disabled';
+             return 'preview';
+        }
     }
 
     const hasVisibleNameField = [...document.querySelectorAll(
@@ -689,9 +865,23 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
         action_btn = page.locator("div[role='dialog'] [data-mdc-dialog-action]")
         with contextlib.suppress(Exception):
             await action_btn.first.click(timeout=timeout)
+            return
+
+        for pattern in _DIALOG_DISMISS_BUTTON_PATTERNS:
+            with contextlib.suppress(Exception):
+                button = page.locator("div[role='dialog']").get_by_role(
+                    "button", name=pattern
+                )
+                await button.first.click(timeout=timeout)
+                return
 
     async def _wake_meeting_ui(self, page: Page) -> None:
-        """Reveal transient in-call controls by nudging the pointer."""
+        """Reveal transient in-call controls by nudging the pointer and tapping a key."""
+        keyboard = getattr(page, "keyboard", None)
+        if keyboard is not None:
+            with contextlib.suppress(Exception):
+                await keyboard.press("Shift")
+
         mouse = getattr(page, "mouse", None)
         if mouse is None:
             return
@@ -736,6 +926,18 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             return True
         if await self._has_visible_button(page, _PARTICIPANTS_BUTTON_PATTERNS):
             return True
+        if (
+            post_wake_state == "shell_active"
+            and self._looks_like_live_meeting_url(page.url)
+            and not await self._preview_join_controls_visible(page)
+            and not await self._has_visible_button(page, _MUTE_BUTTON_PATTERNS)
+            and not await self._has_visible_button(page, _UNMUTE_BUTTON_PATTERNS)
+        ):
+            logger.debug(
+                "Google Meet shell-active validation accepted a stable in-call shell "
+                "without visible controls"
+            )
+            return True
         return False
 
     async def _has_active_meeting_controls(self, page: Page) -> bool:
@@ -756,6 +958,39 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             page.get_by_role("button", name=_PREVIEW_JOIN_CONTROL_PATTERN)
         )
 
+    async def _wait_for_locator_visible(self, locator: Any, *, timeout: float) -> bool:
+        """Poll a locator until it is visible or the timeout expires.
+
+        Unlike ``_locator_is_visible``, which is a single one-shot check, this
+        helper keeps polling every 250 ms.  On the Pi, dynamic Meet UI elements
+        can take several seconds to mount after navigation commit.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with contextlib.suppress(Exception):
+                visible = await asyncio.wait_for(
+                    locator.is_visible(),
+                    timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
+                )
+                if visible:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.25, remaining))
+        return False
+
+    async def _click_locator_if_visible(
+        self, locator: Any, *, timeout: int = 1000
+    ) -> bool:
+        """Click a locator when visible, suppressing transient page races."""
+        if not await self._locator_is_visible(locator):
+            return False
+        with contextlib.suppress(Exception):
+            await locator.click(timeout=timeout)
+            return True
+        return False
+
     async def _locator_is_visible(self, locator: Any) -> bool:
         """Safely check whether a locator is visible."""
         with contextlib.suppress(Exception):
@@ -773,6 +1008,13 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
                 timeout=_DIAGNOSTIC_STEP_DEADLINE_SECONDS,
             )
         return False
+
+    async def _has_visible_text(
+        self, page: Page, patterns: tuple[re.Pattern[str], ...]
+    ) -> bool:
+        """Return True when page text contains any pattern."""
+        text = (await self._read_page_text(page)).lower()
+        return any(pattern.search(text) for pattern in patterns)
 
     async def _read_page_text(self, page: Page) -> str:
         """Return normalized text content for state classification."""
@@ -836,18 +1078,13 @@ class GoogleMeetBrowserPlatformController(BaseBrowserPlatformController):
             fallback="<unavailable>",
         )
         html_snippet = self._summarize_html(html_content)
-        screenshot_path = "<unavailable>"
-
-        candidate_screenshot_path = str(
-            Path(tempfile.gettempdir())
-            / f"joinly-google-meet-timeout-{int(time.time() * 1000)}.png"
-        )
+        screenshot_path = "/tmp/join-failure.png"
         captured_screenshot = await self._read_page_diagnostic(
-            lambda: page.screenshot(path=candidate_screenshot_path, type="png"),
+            lambda: page.screenshot(path=screenshot_path, full_page=False),
             fallback=None,
         )
-        if captured_screenshot is not None:
-            screenshot_path = candidate_screenshot_path
+        if captured_screenshot is None:
+            screenshot_path = "<unavailable>"
 
         logger.error(
             "%s "
